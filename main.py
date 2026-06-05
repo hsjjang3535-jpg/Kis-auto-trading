@@ -672,13 +672,25 @@ def eval_buy(price, ma, da, is_us: bool = False, vol_rate: float = 0.0):
     if da.get("is_pos"):
         if is_us:
             return True, qty, "양봉+활발", "종가베팅"
-        elif da.get("value", 0) >= 30_000_000_000:  # 300억 원으로 하향
+        elif da.get("value", 0) >= 10_000_000_000:  # 100억 원으로 하향
             return True, qty, "양봉+거래대", "종가베팅"
 
     # 기법 2: 이평선 (5선 위 + 20선 위 + 골든크로스) → 상승/하락 괴교없이 판정
     if ma.get("above_ma5") and ma.get("above_ma20") and ma.get("golden"):
         reasons = ["이평선정배열"]
         tech = "이평선"
+        if -8 < ma.get("pullback", 0) < -2:
+            reasons.append(f"눈름{ma['pullback']:.1f}%")
+            tech += "+눈름목"
+        elif ma.get("bounce", 0) > 1:
+            reasons.append(f"돌파{ma['bounce']:.1f}%")
+            tech += "+돌파"
+        return True, qty, ";".join(reasons), tech
+
+    # 기법 2-1: 하락 종목 포함 — 거래대금 급증 + 이평선 정배열
+    if vol_rate >= 150 and ma.get("above_ma5") and ma.get("above_ma20"):
+        reasons = [f"거래대금{vol_rate:.0f}%급증", "이평선정배열"]
+        tech = "종가베팅(하락)"
         if -8 < ma.get("pullback", 0) < -2:
             reasons.append(f"눈름{ma['pullback']:.1f}%")
             tech += "+눈름목"
@@ -707,7 +719,7 @@ def eval_buy(price, ma, da, is_us: bool = False, vol_rate: float = 0.0):
         fail_reasons.append(f"눈름{ma.get('pullback',0):.1f}%")
     if not (ma.get("bounce", 0) > 1):
         fail_reasons.append(f"돌파{ma.get('bounce',0):.1f}%")
-    if not (da.get("value", 0) >= 30_000_000_000):
+    if not (da.get("value", 0) >= 10_000_000_000):
         fail_reasons.append(f"거래대{da.get('value',0)//1_000_000_000:.0f}억")
 
     return False, 0, "", ", ".join(fail_reasons)
@@ -736,7 +748,7 @@ def scan_close_candidates():
     today = now.strftime("%Y%m%d")
     print(f"\n=== 종가매매 후보 스캔 시작 {now.strftime('%Y-%m-%d %H:%M:%S')} ===")
 
-    hot = fetch_hot_stocks_from_kis(limit=30, min_value=50_000_000_000)
+    hot = fetch_hot_stocks_from_kis(limit=30, min_value=10_000_000_000)
     if not hot:
         hot = [{"code": c, "name": c, "change_rate": 0, "trading_value": 0} for c in FALLBACK_WATCHLIST]
         print("스얀 실패, 폴백 WATCHLIST 사용")
@@ -747,7 +759,8 @@ def scan_close_candidates():
         try:
             price, ma, da = analyze(code, is_us=False)
             name = price.get("name", item.get("name", code))
-            fl, qty, r, tech = eval_buy(price, ma, da)
+            vol_rate = item.get("vol_rate", 0)
+            fl, qty, r, tech = eval_buy(price, ma, da, vol_rate=vol_rate)
             if fl:
                 candidates.append({
                     "code": code,
