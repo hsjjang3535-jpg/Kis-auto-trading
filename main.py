@@ -872,8 +872,10 @@ def scan_us_close_candidates():
         try:
             price, ma, da = analyze(code, is_us=True)
             name = price.get("name", item.get("name", code))
-            fl, qty, r, tech = eval_buy(price, ma, da, is_us=True)
+            vol_rate = item.get("vol_rate", 0)
+            fl, qty, r, tech = eval_buy(price, ma, da, is_us=True, vol_rate=vol_rate)
             if fl:
+                vol_tag = f" 거래대금 {vol_rate:.0f}% 급증" if vol_rate >= 150 else ""
                 candidates.append({
                     "code": code,
                     "name": name,
@@ -882,6 +884,7 @@ def scan_us_close_candidates():
                     "trading_value": da.get("value", 0),
                     "reason": r,
                     "technique": tech,
+                    "vol_rate": vol_rate,
                 })
                 trade_db.save_candidate(
                     scan_date=today,
@@ -891,7 +894,7 @@ def scan_us_close_candidates():
                     close_price=price["price"],
                     change_rate=price["change"],
                     trading_value=da.get("value", 0),
-                    reason=r,
+                    reason=r + vol_tag,
                 )
         except Exception as e:
             print(f"    -> 오류 [{code}]: {e}")
@@ -904,7 +907,8 @@ def scan_us_close_candidates():
 
     lines = []
     for c in candidates[:10]:
-        lines.append(f"*{c['name']}* ({c['code']})\n  종가: ${c['close_price']:.2f} | 등락률: {c['change_rate']:.1f}% | 사유: {c['reason']}")
+        vol_tag = f" | 거래대금 {c['vol_rate']:.0f}% 급증" if c.get('vol_rate', 0) >= 150 else ""
+        lines.append(f"*{c['name']}* ({c['code']})\n  종가: ${c['close_price']:.2f} | 등락률: {c['change_rate']:.1f}% | 사유: {c['reason']}{vol_tag}")
 
     msg = f"🔍 *{today} 미국 종가매매 후보 종목* (총 {len(candidates)}개)\n\n" + "\n\n".join(lines)
     send_tg(msg)
@@ -1192,7 +1196,8 @@ def cycle_us():
                         state["bought"].pop(code, None)
                     continue
                 if not state["bought"].get(code):
-                    fl, q, r, tech = eval_buy(price, ma, da, is_us=True)
+                    vol_rate = item.get("vol_rate", 0)
+                    fl, q, r, tech = eval_buy(price, ma, da, is_us=True, vol_rate=vol_rate)
                     if fl:
                         print(f"    -> 미국 매수! {r} | {q}주")
                         resp = us_client.buy(code, q, market=price.get("market", "NAS"))
