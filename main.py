@@ -497,9 +497,22 @@ def fetch_hot_stocks_from_kis(limit=20, min_value=30_000_000_000):
                 value = int(item.get("acml_tr_pbmn", 0))
             except:
                 continue
-            if value < min_value:
+            try:
+                vol_rate = float(item.get("prdy_vrss_vol_rate", 0))
+            except:
+                vol_rate = 0.0
+            # 거래대금 기준: 1.5배 급증 시 반드시 포함, 그 외는 min_value 적용
+            if vol_rate >= 150:
+                threshold = min_value // 3  # 급증 시 1/3 기준으로 하향
+                if threshold < 10_000_000_000:
+                    threshold = 10_000_000_000
+            else:
+                threshold = min_value
+            if value < threshold:
                 continue
-            stocks.append({"code": code, "name": name, "change_rate": change_rate, "trading_value": value})
+            stocks.append({"code": code, "name": name, "change_rate": change_rate, "trading_value": value, "vol_rate": vol_rate})
+        # 거래대금 급증율 높은 순으로 정렬
+        stocks.sort(key=lambda x: x.get("vol_rate", 0), reverse=True)
         return stocks[:limit]
     except Exception as e:
         print(f"KIS 상위조회 예외: {e}")
@@ -528,7 +541,7 @@ KIS 해외 거래대깃 순위 API가 있다면 거기로 갱신 가능
             # ETF 제외는 추후 필터 강화
             if value < 1_000_000_000:  # 10억 달러 이하 제외
                 continue
-            stocks.append({"code": ticker, "name": name, "change_rate": change, "trading_value": value})
+            stocks.append({"code": ticker, "name": name, "change_rate": change, "trading_value": value, "vol_rate": 0})
         return stocks[:limit]
     except Exception as e:
         print(f"Yahoo Finance US 스크런 실패: {e}")
@@ -636,7 +649,7 @@ def analyze(code: str, is_us: bool = False):
         }
     return price, ma, da
 
-def eval_buy(price, ma, da, is_us: bool = False):
+def eval_buy(price, ma, da, is_us: bool = False, vol_rate: float = 0.0):
     """
     종산TV 3대 기법을 각각 독립적으로 판정 (OR 로직)
     - 기법1: 종가베팅 (양봉 + 거래대금)
@@ -745,6 +758,7 @@ def scan_close_candidates():
                     "reason": r,
                     "technique": tech,
                 })
+                vol_tag = f" 거래대금 {vol_rate:.0f}% 급증" if vol_rate >= 150 else ""
                 trade_db.save_candidate(
                     scan_date=today,
                     market="KR",
@@ -753,7 +767,7 @@ def scan_close_candidates():
                     close_price=price["price"],
                     change_rate=price["change"],
                     trading_value=da.get("value", 0),
-                    reason=r,
+                    reason=r + vol_tag,
                 )
         except Exception as e:
             print(f"    -> 오류 [{code}]: {e}")
@@ -766,7 +780,8 @@ def scan_close_candidates():
 
     lines = []
     for c in candidates[:10]:
-        lines.append(f"*{c['name']}* ({c['code']})\n  종가: {c['close_price']:,}원 | 등락률: {c['change_rate']:.1f}% | 사유: {c['reason']}")
+        vol_tag = f" | 거래대금 {c['vol_rate']:.0f}% 급증" if c.get('vol_rate', 0) >= 150 else ""
+        lines.append(f"*{c['name']}* ({c['code']})\n  종가: {c['close_price']:,}원 | 등락률: {c['change_rate']:.1f}% | 사유: {c['reason']}{vol_tag}")
 
     msg = f"🔍 *{today} 종가매매 후보 종목* (총 {len(candidates)}개)\n\n" + "\n\n".join(lines)
     send_tg(msg)
@@ -1090,6 +1105,7 @@ def cycle_kr():
         held = {h["code"]: h for h in holdings}
         for item in watchlist:
             code = item["code"]
+            vol_rate = item.get("vol_rate", 0.0)
             try:
                 price, ma, da = analyze(code, is_us=False)
                 name = price.get("name", item.get("name", code))
@@ -1105,7 +1121,7 @@ def cycle_kr():
                         state["bought"].pop(code, None)
                     continue
                 if not state["bought"].get(code):
-                    fl, q, r, tech = eval_buy(price, ma, da)
+                    fl, q, r, tech = eval_buy(price, ma, da, vol_rate=vol_rate)
                     if fl:
                         print(f"    -> 매수! {r} | {q}주")
                         resp = client.buy(code, q)
