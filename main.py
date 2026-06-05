@@ -662,7 +662,7 @@ def eval_buy(price, ma, da, is_us: bool = False, vol_rate: float = 0.0):
 
     # 공통 필터: 과도성장
     gap = (p - price.get("prev", p)) / price.get("prev", p) * 100 if price.get("prev") else 0
-    if gap > 15:
+    if gap > 20:
         return False, 0, "", f"과도성장{gap:.0f}%"
 
     budget = US_MAX_BUDGET_USD if is_us else MAX_BUDGET
