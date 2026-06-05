@@ -23,11 +23,11 @@ import pytz
 
 # ==================== 설정 ====================
 KIS_APP_KEY = os.environ.get("KIS_APP_KEY", "")
-KIS_APP_SECRET = os.environ.get("KIS_APP_SECRET", "")
+KIS_APP_SECRET=***os.environ.get("KIS_APP_SECRET", "")
 KIS_ACCOUNT_NUMBER = os.environ.get("KIS_ACCOUNT_NUMBER", "50191209-01")
 KIS_BASE_URL = os.environ.get("KIS_BASE_URL", "https://openapivts.koreainvestment.com:29443")
 
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_BOT_TOKEN=***os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 MAX_BUDGET = int(os.environ.get("MAX_BUDGET_PER_STOCK", "500000"))
