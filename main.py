@@ -23,11 +23,11 @@ import pytz
 
 # ==================== 설정 ====================
 KIS_APP_KEY = os.environ.get("KIS_APP_KEY", "")
-KIS_APP_SECRET=***os.environ.get("KIS_APP_SECRET", "")
+KIS_APP_SECRET = os.environ.get("KIS_APP_SECRET", "")
 KIS_ACCOUNT_NUMBER = os.environ.get("KIS_ACCOUNT_NUMBER", "50191209-01")
 KIS_BASE_URL = os.environ.get("KIS_BASE_URL", "https://openapivts.koreainvestment.com:29443")
 
-TELEGRAM_BOT_TOKEN=***os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 MAX_BUDGET = int(os.environ.get("MAX_BUDGET_PER_STOCK", "500000"))
@@ -46,7 +46,7 @@ ETF_KEYWORDS = ("KODEX", "TIGER", "RISE", "SOL", "PLUS", "HANARO", "KB", "KBI",
 
 # ==================== 테노그램 ====================
 def send_tg(text: str, file_path: str = None):
-TELEGRAM_BOT_TOKEN=os.env...N", "")
+    token = (TELEGRAM_BOT_TOKEN or "").strip()
     chat = (TELEGRAM_CHAT_ID or "").strip()
     if not token or not chat:
         print(f"[TG 미설정] token={'*'*len(token) if token else 'EMPTY'} chat={'*'*len(chat) if chat else 'EMPTY'}")
@@ -257,7 +257,7 @@ class KISClient:
         if self.token and self.expires and datetime.now() < self.expires:
             return self.token
         url = f"{KIS_BASE_URL}/oauth2/token"
-KIS_APP_SECRET=os.env...T", "")
+        body = {"grant_type": "client_credentials", "appkey": KIS_APP_KEY, "appsecret": KIS_APP_SECRET}
         r = requests.post(url, headers={"content-type": "application/json"}, data=json.dumps(body), timeout=15)
         d = r.json()
         if "access_token" not in d:
@@ -272,7 +272,7 @@ KIS_APP_SECRET=os.env...T", "")
             "content-type": "application/json",
             "authorization": f"Bearer {self._get_token()}",
             "appkey": KIS_APP_KEY,
-KIS_APP_SECRET=os.env...T", "")
+            "appsecret": KIS_APP_SECRET,
             "tr_id": tr_id,
         }
 
@@ -357,7 +357,7 @@ KIS 해외주식 API (모의투자)
             "content-type": "application/json",
             "authorization": f"Bearer {self.client._get_token()}",
             "appkey": KIS_APP_KEY,
-KIS_APP_SECRET=os.env...T", "")
+            "appsecret": KIS_APP_SECRET,
             "tr_id": tr_id,
         }
 
@@ -473,7 +473,7 @@ def fetch_hot_stocks_from_kis(limit=20, min_value=30_000_000_000):
             "content-type": "application/json",
             "authorization": f"Bearer {client._get_token()}",
             "appkey": KIS_APP_KEY,
-KIS_APP_SECRET=os.env...T", "")
+            "appsecret": KIS_APP_SECRET,
             "tr_id": "FHPST01710000",
         }
         r = requests.get(url, headers=headers, params=params, timeout=15)
