@@ -68,6 +68,7 @@ def fetch_top_stocks(client: KISClient, limit=30, min_value=10_000_000_000):
         stocks.append({"code": code, "name": name, "trading_value": value})
     return stocks[:limit]
 
+
 app = FastAPI()
 client = KISClient()
 scheduler = BackgroundScheduler(timezone=pytz.timezone(config.TIMEZONE))
@@ -98,10 +99,28 @@ def is_market_open(now: datetime = None) -> bool:
     return 900 <= hm <= 1530
 
 
+def is_us_market_open(now: datetime = None) -> bool:
+    """미국장 개장 여부 (DST 여름: 21:30~04:00 KST)"""
+    if not config.US_ENABLED:
+        return False
+    if now is None:
+        now = datetime.now(pytz.timezone(config.TIMEZONE))
+    weekday = now.weekday()
+    hm = now.hour * 100 + now.minute
+    # 월~금: 21:30 ~ 다음날 04:00
+    if weekday == 0:  # 월요일
+        return hm >= 2130
+    if weekday >= 1 and weekday <= 4:  # 화~금
+        return hm >= 2130 or hm <= 400
+    if weekday == 5:  # 토요일
+        return hm <= 400
+    return False
+
+
 def run_trading_cycle():
     now = datetime.now(pytz.timezone(config.TIMEZONE))
     if not is_market_open(now):
-        print(f"[{now}] 시장 종료 또는 주말. 실행 스킵.")
+        print(f"[{now}] 시장 종뢰 또는 주말. 실행 스킵.")
         return
 
     print(f"\n=== [트레이딩 사이클 시작] {now.strftime('%Y-%m-%d %H:%M:%S')} ===")
@@ -206,14 +225,144 @@ def run_trading_cycle():
         telegram_bot.send_error_alert(str(e))
 
 
-# APScheduler: KST 기준으로 매수 5분마다
-# 장 중 09:05 ~ 15:25 동안만 실행 (시잤 관리 선조를 망함)
+def run_us_trading_cycle():
+    """미국장 트레이딩 사이플"""
+    now = datetime.now(pytz.timezone(config.TIMEZONE))
+    if not is_us_market_open(now):
+        print(f"[{now}] 미국장 마감. 실행 스킵.")
+        return
+
+    print(f"\n=== [US 트레이딩 사이플 시작] {now.strftime('%Y-%m-%d %H:%M:%S')} ===")
+    state = load_state()
+    today_str = now.strftime("%Y%m%d")
+    us_key = f"us_buy_done_{today_str}"
+    us_scan_key = f"us_hot_stocks_{today_str}"
+
+    if us_key not in state:
+        state[us_key] = {}
+
+    try:
+        # 미국장 잔고
+        us_balance = client.get_us_balance(exchange=config.US_EXCHANGE)
+        us_cash = us_balance["cash"]
+        us_holdings = {h["stock_code"]: h for h in us_balance["holdings"]}
+
+        print(f"US 예수액: ${us_cash:,.2f} | 보유: {len(us_holdings)}개")
+
+        # 미국장 스캔 (첫 1회)
+        if not state.get(us_scan_key):
+            print("US 핫 종목 스캔...")
+            us_stocks = []
+            for code in config.US_WATCHLIST:
+                code = code.strip()
+                if not code:
+                    continue
+                try:
+                    price = client.get_us_price(code, exchange=config.US_EXCHANGE)
+                    if price["trading_value"] >= 10_000_000:  # $10M
+                        us_stocks.append({
+                            "code": code,
+                            "name": price["stock_name"],
+                            "price": price["current_price"],
+                            "change_rate": price["change_rate"],
+                            "value": price["trading_value"],
+                        })
+                except Exception as e:
+                    continue
+            state[us_scan_key] = us_stocks
+            print(f"US 감시 종목: {len(us_stocks)}개")
+            if us_stocks:
+                names = [f"{s['name']}({s['code']})" for s in us_stocks[:10]]
+                telegram_bot.send_info(f"*[오늘의 US 후보]* ({today_str})\n" + "\n".join(names))
+
+        us_watchlist = state.get(us_scan_key, [])
+
+        for stock_info in us_watchlist:
+            stock_code = stock_info["code"].strip()
+            stock_name = stock_info.get("name", stock_code)
+            if not stock_code:
+                continue
+
+            try:
+                price_info = client.get_us_price(stock_code, exchange=config.US_EXCHANGE)
+                stock_name = price_info.get("stock_name", stock_name)
+                current_price = price_info["current_price"]
+
+                # 5분봉
+                minute_data = client.get_us_minute(stock_code, exchange=config.US_EXCHANGE, period="5")
+                minute_analysis = analyze_minute_data(minute_data)
+
+                # 일등봉
+                daily_data = client.get_us_daily(stock_code, exchange=config.US_EXCHANGE, count=60)
+                daily_analysis = analyze_daily_data(daily_data)
+
+                print(f"  [US {stock_name}] ${current_price:.2f} | "
+                      f"MA5: {minute_analysis.get('ma5')} | "
+                      f"vol_spike: {minute_analysis.get('volume_spike')}")
+
+                # 보유 중이면 매도
+                if stock_code in us_holdings:
+                    position = us_holdings[stock_code]
+                    sell_flag, sell_qty, sell_reason = should_sell(
+                        position, price_info, minute_analysis,
+                        stop_loss_pct=config.US_STOP_LOSS_PCT,
+                        take_profit_pct=config.US_TAKE_PROFIT_PCT
+                    )
+                    if sell_flag:
+                        print(f"    -> US 매도! {sell_reason}")
+                        resp = client.order_us_sell(stock_code, sell_qty, exchange=config.US_EXCHANGE)
+                        print(f"    -> {resp}")
+                        profit_pct = position.get("profit_loss_rate", 0)
+                        telegram_bot.send_sell_alert(
+                            stock_name, stock_code, current_price, sell_qty, profit_pct, sell_reason
+                        )
+                        state[us_key].pop(stock_code, None)
+                    continue
+
+                # 미보유 중이고 오늘 내역 없으면 매수
+                already_bought = state[us_key].get(stock_code, False)
+                if not already_bought:
+                    buy_flag, buy_qty, buy_reason = should_buy(
+                        price_info, minute_analysis, daily_analysis, config.US_MAX_BUDGET_PER_STOCK
+                    )
+                    if buy_flag:
+                        print(f"    -> US 매수! {buy_reason} | {buy_qty}주")
+                        resp = client.order_us_buy(stock_code, buy_qty, exchange=config.US_EXCHANGE)
+                        print(f"    -> {resp}")
+                        telegram_bot.send_buy_alert(
+                            stock_name, stock_code, current_price, buy_qty, buy_reason
+                        )
+                        state[us_key][stock_code] = True
+
+            except Exception as e:
+                print(f"    -> US 오류 [{stock_code}]: {e}")
+                telegram_bot.send_error_alert(f"US {stock_code} 처리 중 오류: {e}")
+                continue
+
+        save_state(state)
+        print(f"=== [US 트레이딩 사이플 완료] ===\n")
+
+    except Exception as e:
+        print(f"US 주요 실행 오류: {e}")
+        telegram_bot.send_error_alert(f"US: {e}")
+
+
+# APScheduler: KST 기준으로 국내장 5분맛
 scheduler.add_job(
     run_trading_cycle,
     trigger=CronTrigger(minute="*/5", hour="9-15", day_of_week="mon-fri", timezone=config.TIMEZONE),
     id="trading_cycle",
     replace_existing=True,
 )
+
+# 미국장: 월~토 21:30~04:00 (5분맛)
+if config.US_ENABLED:
+    scheduler.add_job(
+        run_us_trading_cycle,
+        trigger=CronTrigger(minute="*/5", hour="21-23,0-4", day_of_week="mon-fri,sat", timezone=config.TIMEZONE),
+        id="us_trading_cycle",
+        replace_existing=True,
+    )
 
 # 방어 후 10초 뒤 바로 한 번 실행해서 시작 점검
 scheduler.add_job(
@@ -233,13 +382,24 @@ def root():
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "market_open": is_market_open()}
+    return {"status": "ok", "market_open": is_market_open(), "us_market_open": is_us_market_open()}
 
 
 @app.get("/balance")
 def api_balance():
     try:
         bal = client.get_balance()
+        return bal
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.get("/us_balance")
+def api_us_balance():
+    try:
+        if not config.US_ENABLED:
+            return {"error": "US 시장 비활성화"}
+        bal = client.get_us_balance(exchange=config.US_EXCHANGE)
         return bal
     except Exception as e:
         return {"error": str(e)}
