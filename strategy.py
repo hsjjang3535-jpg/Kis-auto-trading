@@ -197,7 +197,7 @@ def should_buy(price_info: Dict, minute_analysis: Dict, daily_analysis: Dict, bu
     return True, quantity, "; ".join(reasons)
 
 
-def should_sell(position: Dict, price_info: Dict, minute_analysis: Dict) -> tuple:
+def should_sell(position: Dict, price_info: Dict, minute_analysis: Dict, stop_loss_pct: float = -2.5, take_profit_pct: float = 2.0) -> tuple:
     """
     매도 판정: 수익부 또는 손절 만족 시
     반환: (should_sell: bool, quantity: int, reason: str)
@@ -212,11 +212,11 @@ def should_sell(position: Dict, price_info: Dict, minute_analysis: Dict) -> tupl
     profit_pct = (current_price - avg_price) / avg_price * 100
 
     # 수익부 달성
-    if profit_pct >= 2.0:
+    if profit_pct >= take_profit_pct:
         return True, hold_qty, f"수익부 달성 ({profit_pct:+.2f}%)"
 
     # 손절 라인
-    if profit_pct <= -2.5:
+    if profit_pct <= stop_loss_pct:
         return True, hold_qty, f"손절 라인 추진 ({profit_pct:+.2f}%)"
 
     # 5봉선 이하 도람: 추세 약화 시 방어
