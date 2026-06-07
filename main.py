@@ -14,7 +14,6 @@ import config
 from kis_client import KISClient
 from strategy import analyze_minute_data, analyze_daily_data, should_buy, should_sell
 import telegram_bot
-import report_csv  # CSV 보고 모듈
 
 # ==================== KIS API 거래대금 상위 자동 스캔 ====================
 ETF_KEYWORDS = ("KODEX", "TIGER", "RISE", "SOL", "PLUS", "HANARO", "KB", "KBI",
@@ -142,10 +141,6 @@ def run_trading_cycle():
         print(f"지금 예수금: {cash:,}원 | 보유 종목: {len(holdings)}개")
 
         # CSV: 잔고 보고
-        try:
-            report_csv.save_balance_report(today_str, cash, len(holdings), market="KR")
-        except Exception as e:
-            print(f"[CSV] 잔고 보고 저장 실패: {e}")
 
         # 2. 오늘의 핫 종목 스캔 (장중 첫 1회만, 상태에 캐싱)
         if state.get("last_run_date") != today_str or not state.get("hot_stocks"):
@@ -160,10 +155,6 @@ def run_trading_cycle():
             names = [f"{h.get('name', h['code'])}({h['code']})" for h in hot_stocks[:10]]
             telegram_bot.send_info(f"*[오늘의 종가베팅 후보]* ({today_str})\n" + "\n".join(names))
             # CSV: 스캔 결과 저장
-            try:
-                report_csv.save_scan_report(today_str, hot_stocks, market="KR")
-            except Exception as e:
-                print(f"[CSV] 스캔 결과 저장 실패: {e}")
 
         watchlist = state["hot_stocks"]
 
@@ -206,13 +197,6 @@ def run_trading_cycle():
                             stock_name, stock_code, current_price, sell_qty, profit_pct, sell_reason
                         )
                         # CSV: 매도 내역
-                        try:
-                            report_csv.save_trade_report(
-                                today_str, "SELL", stock_code, stock_name,
-                                current_price, sell_qty, sell_reason, profit_pct, market="KR"
-                            )
-                        except Exception as e:
-                            print(f"[CSV] 매도 내역 저장 실패: {e}")
                         # 내역 업데이트
                         state["buy_done_today"].pop(stock_code, None)
                     continue
@@ -231,13 +215,6 @@ def run_trading_cycle():
                             stock_name, stock_code, current_price, buy_qty, buy_reason
                         )
                         # CSV: 매수 내역
-                        try:
-                            report_csv.save_trade_report(
-                                today_str, "BUY", stock_code, stock_name,
-                                current_price, buy_qty, buy_reason, market="KR"
-                            )
-                        except Exception as e:
-                            print(f"[CSV] 매수 내역 저장 실패: {e}")
                         state["buy_done_today"][stock_code] = True
 
             except Exception as e:
@@ -278,10 +255,6 @@ def run_us_trading_cycle():
         print(f"US 예수액: ${us_cash:,.2f} | 보유: {len(us_holdings)}개")
 
         # CSV: US 잔고 보고
-        try:
-            report_csv.save_balance_report(today_str, us_cash, len(us_holdings), market="US")
-        except Exception as e:
-            print(f"[CSV] US 잔고 보고 저장 실패: {e}")
 
         # 미국장 스캔 (첫 1회)
         if not state.get(us_scan_key):
@@ -309,10 +282,6 @@ def run_us_trading_cycle():
                 names = [f"{s['name']}({s['code']})" for s in us_stocks[:10]]
                 telegram_bot.send_info(f"*[오늘의 US 후보]* ({today_str})\n" + "\n".join(names))
                 # CSV: US 스캔 결과
-                try:
-                    report_csv.save_scan_report(today_str, us_stocks, market="US")
-                except Exception as e:
-                    print(f"[CSV] US 스캔 결과 저장 실패: {e}")
 
         us_watchlist = state.get(us_scan_key, [])
 
@@ -356,13 +325,6 @@ def run_us_trading_cycle():
                             stock_name, stock_code, current_price, sell_qty, profit_pct, sell_reason
                         )
                         # CSV: US 매도 내역
-                        try:
-                            report_csv.save_trade_report(
-                                today_str, "SELL", stock_code, stock_name,
-                                current_price, sell_qty, sell_reason, profit_pct, market="US"
-                            )
-                        except Exception as e:
-                            print(f"[CSV] US 매도 내역 저장 실패: {e}")
                         state[us_key].pop(stock_code, None)
                     continue
 
@@ -380,13 +342,6 @@ def run_us_trading_cycle():
                             stock_name, stock_code, current_price, buy_qty, buy_reason
                         )
                         # CSV: US 매수 내역
-                        try:
-                            report_csv.save_trade_report(
-                                today_str, "BUY", stock_code, stock_name,
-                                current_price, buy_qty, buy_reason, market="US"
-                            )
-                        except Exception as e:
-                            print(f"[CSV] US 매수 내역 저장 실패: {e}")
                         state[us_key][stock_code] = True
 
             except Exception as e:
