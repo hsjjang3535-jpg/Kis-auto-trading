@@ -627,28 +627,6 @@ def api_price(stock_code: str):
         return {"error": str(e)}
 
 
-@app.get("/debug/token")
-def debug_token():
-    """KIS 토큰 발급 테스트"""
-    try:
-        import requests as req
-        url = f"{config.KIS_BASE_URL}/oauth2/token"
-        headers = {"content-type": "application/x-www-form-urlencoded"}
-        body = {
-            "grant_type": "client_credentials",
-            "appkey": config.KIS_APP_KEY,
-            "appsecret": config.KIS_APP_SECRET,
-        }
-        resp = req.post(url, headers=headers, data=body, timeout=15)
-        data = resp.json()
-        # 토큰 마스킹
-        if "access_token" in data:
-            data["access_token"] = data["access_token"][:20] + "..."
-        return {"status": "ok", "response": data, "key_len": len(config.KIS_APP_KEY), "secret_len": len(config.KIS_APP_SECRET)}
-    except Exception as e:
-        return {"error": str(e), "key_len": len(config.KIS_APP_KEY), "secret_len": len(config.KIS_APP_SECRET)}
-
-
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
