@@ -18,6 +18,10 @@ MAX_BUDGET_PER_STOCK = int(os.environ.get("MAX_BUDGET_PER_STOCK", "500000"))  # 
 STOP_LOSS_PCT = float(os.environ.get("STOP_LOSS_PCT", "-2.5"))  # 손절 -2.5%
 TAKE_PROFIT_PCT = float(os.environ.get("TAKE_PROFIT_PCT", "3.0"))  # 익절 +3%
 
+# 과매도 반등 전략 설정
+OVERSOLD_STOP_LOSS_PCT = float(os.environ.get("OVERSOLD_STOP_LOSS_PCT", "-1.5"))  # 과매도 손절 -1.5%
+OVERSOLD_TAKE_PROFIT_PCT = float(os.environ.get("OVERSOLD_TAKE_PROFIT_PCT", "1.5"))  # 과매도 익절 +1.5%
+
 # 관심 종목 목록 (사용자가 바꾼 수 있음)
 WATCHLIST = os.environ.get("WATCHLIST", "005930,000660,035420,001820,001170,079550").split(",")
 

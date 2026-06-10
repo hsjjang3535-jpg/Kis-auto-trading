@@ -12,7 +12,7 @@ import pytz
 
 import config
 from kis_client import KISClient
-from strategy import analyze_minute_data, analyze_daily_data, should_buy, should_sell
+from strategy import analyze_minute_data, analyze_daily_data, should_buy, should_buy_oversold, should_sell
 import telegram_bot
 
 # ==================== KIS API 거래대금 상위 자동 스캔 ====================
@@ -203,7 +203,16 @@ def run_trading_cycle():
                 # 보유 중이면 매도 판정
                 if stock_code in holdings:
                     position = holdings[stock_code]
-                    sell_flag, sell_qty, sell_reason = should_sell(position, price_info, minute_analysis)
+                    # 전략에 따라 TP/SL 다르게 적용
+                    stock_strategy = state.get("stock_strategy", {}).get(stock_code, "regular")
+                    if stock_strategy == "oversold":
+                        sell_flag, sell_qty, sell_reason = should_sell(
+                            position, price_info, minute_analysis,
+                            stop_loss_pct=config.OVERSOLD_STOP_LOSS_PCT,
+                            take_profit_pct=config.OVERSOLD_TAKE_PROFIT_PCT
+                        )
+                    else:
+                        sell_flag, sell_qty, sell_reason = should_sell(position, price_info, minute_analysis)
                     if sell_flag:
                         print(f"    -> 매도 신호! {sell_reason}")
                         resp = client.order_sell(stock_code, sell_qty)
@@ -225,23 +234,37 @@ def run_trading_cycle():
                 # 미보유 중이고 오늘 매수 없으면 매수 판정
                 already_bought_today = state["buy_done_today"].get(stock_code, False)
                 if not already_bought_today:
+                    # 1차: 상승장 기법
                     buy_flag, buy_qty, buy_reason = should_buy(
                         price_info, minute_analysis, daily_analysis, config.MAX_BUDGET_PER_STOCK
                     )
+                    strategy = "regular"
+
+                    # 2차: 과매도 반등 기법
+                    if not buy_flag:
+                        buy_flag, buy_qty, buy_reason = should_buy_oversold(
+                            price_info, minute_analysis, daily_analysis, config.MAX_BUDGET_PER_STOCK
+                        )
+                        strategy = "oversold"
+
                     if buy_flag:
-                        print(f"    -> 매수 신호! {buy_reason} | 수량: {buy_qty}주")
+                        print(f"    -> 매수 신호! [{strategy}] {buy_reason} | 수량: {buy_qty}주")
                         resp = client.order_buy(stock_code, buy_qty)
                         print(f"    -> 주문 응답: {resp}")
-                        # 기록만 (알림은 장 마감 보고에서)
+                        # 기록
                         state[f"kr_buy_records_{today_str}"].append({
                             "name": stock_name,
                             "code": stock_code,
                             "price": current_price,
                             "quantity": buy_qty,
                             "reason": buy_reason,
+                            "strategy": strategy,
                             "time": now.strftime("%H:%M"),
                         })
                         state["buy_done_today"][stock_code] = True
+                        if "stock_strategy" not in state:
+                            state["stock_strategy"] = {}
+                        state["stock_strategy"][stock_code] = strategy
                     else:
                         # 미매수 사유 기록 (마지막 사유만 유지)
                         state[f"kr_skip_reasons_{today_str}"][stock_code] = {
@@ -339,11 +362,19 @@ def run_us_trading_cycle():
                 # 보유 중이면 매도
                 if stock_code in us_holdings:
                     position = us_holdings[stock_code]
-                    sell_flag, sell_qty, sell_reason = should_sell(
-                        position, price_info, minute_analysis,
-                        stop_loss_pct=config.US_STOP_LOSS_PCT,
-                        take_profit_pct=config.US_TAKE_PROFIT_PCT
-                    )
+                    stock_strategy = state.get("stock_strategy", {}).get(stock_code, "regular")
+                    if stock_strategy == "oversold":
+                        sell_flag, sell_qty, sell_reason = should_sell(
+                            position, price_info, minute_analysis,
+                            stop_loss_pct=config.OVERSOLD_STOP_LOSS_PCT,
+                            take_profit_pct=config.OVERSOLD_TAKE_PROFIT_PCT
+                        )
+                    else:
+                        sell_flag, sell_qty, sell_reason = should_sell(
+                            position, price_info, minute_analysis,
+                            stop_loss_pct=config.US_STOP_LOSS_PCT,
+                            take_profit_pct=config.US_TAKE_PROFIT_PCT
+                        )
                     if sell_flag:
                         print(f"    -> US 매도! {sell_reason}")
                         resp = client.order_us_sell(stock_code, sell_qty, exchange=config.US_EXCHANGE)
@@ -364,11 +395,21 @@ def run_us_trading_cycle():
                 # 미보유 중이고 오늘 매수 없으면 매수
                 already_bought = state.get(f"us_buy_done_{today_str}", {}).get(stock_code, False)
                 if not already_bought:
+                    # 1차: 상승장 기법
                     buy_flag, buy_qty, buy_reason = should_buy(
                         price_info, minute_analysis, daily_analysis, config.US_MAX_BUDGET_PER_STOCK
                     )
+                    strategy = "regular"
+
+                    # 2차: 과매도 반등 기법
+                    if not buy_flag:
+                        buy_flag, buy_qty, buy_reason = should_buy_oversold(
+                            price_info, minute_analysis, daily_analysis, config.US_MAX_BUDGET_PER_STOCK
+                        )
+                        strategy = "oversold"
+
                     if buy_flag:
-                        print(f"    -> US 매수! {buy_reason} | {buy_qty}주")
+                        print(f"    -> US 매수! [{strategy}] {buy_reason} | {buy_qty}주")
                         resp = client.order_us_buy(stock_code, buy_qty, exchange=config.US_EXCHANGE)
                         print(f"    -> {resp}")
                         state[f"us_buy_records_{today_str}"].append({
@@ -377,11 +418,15 @@ def run_us_trading_cycle():
                             "price": current_price,
                             "quantity": buy_qty,
                             "reason": buy_reason,
+                            "strategy": strategy,
                             "time": now.strftime("%H:%M"),
                         })
                         if f"us_buy_done_{today_str}" not in state:
                             state[f"us_buy_done_{today_str}"] = {}
                         state[f"us_buy_done_{today_str}"][stock_code] = True
+                        if "stock_strategy" not in state:
+                            state["stock_strategy"] = {}
+                        state["stock_strategy"][stock_code] = strategy
                     else:
                         state[f"us_skip_reasons_{today_str}"][stock_code] = {
                             "name": stock_name,
