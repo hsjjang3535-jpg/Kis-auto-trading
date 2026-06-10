@@ -16,7 +16,7 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 # 매매 설정
 MAX_BUDGET_PER_STOCK = int(os.environ.get("MAX_BUDGET_PER_STOCK", "500000"))  # 종당 최대 50만원
 STOP_LOSS_PCT = float(os.environ.get("STOP_LOSS_PCT", "-2.5"))  # 손절 -2.5%
-TAKE_PROFIT_PCT = float(os.environ.get("TAKE_PROFIT_PCT", "2.0"))  # 읍절 +2%
+TAKE_PROFIT_PCT = float(os.environ.get("TAKE_PROFIT_PCT", "3.0"))  # 익절 +3%
 
 # 관심 종목 목록 (사용자가 바꾼 수 있음)
 WATCHLIST = os.environ.get("WATCHLIST", "005930,000660,035420,001820,001170,079550").split(",")
@@ -31,7 +31,7 @@ MARKET_CLOSE_MINUTE = 30
 US_ENABLED = os.environ.get("US_ENABLED", "true").lower() == "true"
 US_MAX_BUDGET_PER_STOCK = int(os.environ.get("US_MAX_BUDGET_PER_STOCK", "500"))  # $500
 US_STOP_LOSS_PCT = float(os.environ.get("US_STOP_LOSS_PCT", "-2.5"))
-US_TAKE_PROFIT_PCT = float(os.environ.get("US_TAKE_PROFIT_PCT", "2.0"))
+US_TAKE_PROFIT_PCT = float(os.environ.get("US_TAKE_PROFIT_PCT", "3.0"))
 US_EXCHANGE = os.environ.get("US_EXCHANGE", "NAS")  # NAS (NASDAQ) or NYS (NYSE)
 US_WATCHLIST = os.environ.get("US_WATCHLIST", "AAPL,MSFT,GOOGL,AMZN,TSLA,NVDA,META,AMD,CRM,INTC").split(",")
 
