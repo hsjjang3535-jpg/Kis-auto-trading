@@ -19,14 +19,14 @@ class KISClient:
         if self.access_token and self.token_expired_at and datetime.now() < self.token_expired_at:
             return self.access_token
 
-        url = f"{self.base_url}/oauth2/TokenP"
-        headers = {"content-type": "application/json"}
+        url = f"{self.base_url}/oauth2/token"
+        headers = {"content-type": "application/x-www-form-urlencoded"}
         body = {
             "grant_type": "client_credentials",
             "appkey": self.app_key,
             "appsecret": self.app_secret,
         }
-        resp = requests.post(url, headers=headers, data=json.dumps(body), timeout=15)
+        resp = requests.post(url, headers=headers, data=body, timeout=15)
         data = resp.json()
         if "access_token" not in data:
             raise Exception(f"토큰 발급 실패: {data}")
