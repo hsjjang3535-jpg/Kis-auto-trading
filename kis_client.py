@@ -19,7 +19,7 @@ class KISClient:
         if self.access_token and self.token_expired_at and datetime.now() < self.token_expired_at:
             return self.access_token
 
-        url = f"{self.base_url}/oauth2/token"
+        url = f"{self.base_url}/oauth2/TokenP"
         headers = {"content-type": "application/json"}
         body = {
             "grant_type": "client_credentials",
@@ -31,7 +31,7 @@ class KISClient:
         if "access_token" not in data:
             raise Exception(f"토큰 발급 실패: {data}")
         self.access_token = data["access_token"]
-        # 유효기간은 서버 응답의 expires_in(초)를 사용, 바로 재발급 하지 않도록 10분 여유를 딜
+        # 유효기간은 서버 응답의 expires_in(초)를 사용, 바로 재발급 하지 않도록 10분 여유
         expires_in = data.get("expires_in", 86400)
         self.token_expired_at = datetime.now() + timedelta(seconds=expires_in - 600)
         return self.access_token
@@ -91,7 +91,7 @@ class KISClient:
         return data.get("output2", [])
 
     def get_daily_candles(self, stock_code: str, count=60):
-        """일등봉 조회 (FHKST01010400) - count 만큼"""
+        """일봉 조회 (FHKST01010400) - count 만큼"""
         url = f"{self.base_url}/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice"
         params = {
             "FID_COND_MRKT_DIV_CODE": "J",
@@ -103,7 +103,7 @@ class KISClient:
         resp = requests.get(url, headers=headers, params=params, timeout=15)
         data = resp.json()
         if data.get("rt_cd") != "0":
-            raise Exception(f"일등봉 조회 실패 [{stock_code}]: {data}")
+            raise Exception(f"일봉 조회 실패 [{stock_code}]: {data}")
         return data.get("output2", [])[:count]
 
     def get_balance(self):
@@ -127,7 +127,7 @@ class KISClient:
         data = resp.json()
         if data.get("rt_cd") != "0":
             raise Exception(f"잔고 조회 실패: {data}")
-        # 나추 나추 종목
+        # 보유 종목
         holdings = []
         for item in data.get("output1", []):
             if item.get("pdno") and item.get("pdno") != "":
@@ -140,7 +140,7 @@ class KISClient:
                     "eval_amount": int(item.get("evlu_amt", 0)),
                     "profit_loss_rate": float(item.get("evlu_pfls_rt", 0)),
                 })
-        # 미당금
+        # 예수금
         cash = 0
         for item in data.get("output2", []):
             cash = int(item.get("dnca_tot_amt", 0))
@@ -158,6 +158,22 @@ class KISClient:
             "ORD_UNPR": "0",   # 시장가는 0
         }
         headers = self._headers(tr_id="VTTC0802U")
+        resp = requests.post(url, headers=headers, data=json.dumps(body), timeout=15)
+        data = resp.json()
+        return data
+
+    def order_sell(self, stock_code: str, quantity: int):
+        """시장가 매도 (VTTC0801U)"""
+        url = f"{self.base_url}/uapi/domestic-stock/v1/trading/order-cash"
+        body = {
+            "CANO": self.account_no.split("-")[0],
+            "ACNT_PRDT_CD": self.account_no.split("-")[1] if "-" in self.account_no else self.account_product,
+            "PDNO": stock_code,
+            "ORD_DVSN": "01",  # 시장가
+            "ORD_QTY": str(quantity),
+            "ORD_UNPR": "0",
+        }
+        headers = self._headers(tr_id="VTTC0801U")
         resp = requests.post(url, headers=headers, data=json.dumps(body), timeout=15)
         data = resp.json()
         return data
@@ -189,7 +205,7 @@ class KISClient:
         }
 
     def get_us_daily(self, stock_code: str, exchange: str = "NAS", count=60):
-        """해외 주식 일등봉 조회 (HHDFS76240000)"""
+        """해외 주식 일봉 조회 (HHDFS76240000)"""
         url = f"{self.base_url}/uapi/overseas-stock/v1/quotations/dailyprice"
         params = {
             "FID_COND_MRKT_DIV_CODE": exchange,
@@ -201,7 +217,7 @@ class KISClient:
         resp = requests.get(url, headers=headers, params=params, timeout=15)
         data = resp.json()
         if data.get("rt_cd") != "0":
-            raise Exception(f"해외 일등봉 조회 실패 [{stock_code}]: {data}")
+            raise Exception(f"해외 일봉 조회 실패 [{stock_code}]: {data}")
         return data.get("output2", [])[:count]
 
     def get_us_balance(self, exchange: str = "NAS"):
@@ -237,7 +253,7 @@ class KISClient:
         return {"cash": cash, "holdings": holdings}
 
     def order_us_buy(self, stock_code: str, quantity: int, exchange: str = "NAS"):
-        """해외시장가 매수 (VTTT1002U)"""
+        """해외 시장가 매수 (VTTT1002U)"""
         url = f"{self.base_url}/uapi/overseas-stock/v1/trading/order"
         cano = self.account_no.split("-")[0]
         prdt = self.account_no.split("-")[1] if "-" in self.account_no else self.account_product
@@ -256,7 +272,7 @@ class KISClient:
         return resp.json()
 
     def order_us_sell(self, stock_code: str, quantity: int, exchange: str = "NAS"):
-        """해외시장가 매도 (VTTT1001U)"""
+        """해외 시장가 매도 (VTTT1001U)"""
         url = f"{self.base_url}/uapi/overseas-stock/v1/trading/order"
         cano = self.account_no.split("-")[0]
         prdt = self.account_no.split("-")[1] if "-" in self.account_no else self.account_product
@@ -289,17 +305,3 @@ class KISClient:
         if data.get("rt_cd") != "0":
             raise Exception(f"해외 분봉 조회 실패 [{stock_code}]: {data}")
         return data.get("output2", [])
-        """시장가 매도 (VTTC0801U)"""
-        url = f"{self.base_url}/uapi/domestic-stock/v1/trading/order-cash"
-        body = {
-            "CANO": self.account_no.split("-")[0],
-            "ACNT_PRDT_CD": self.account_no.split("-")[1] if "-" in self.account_no else self.account_product,
-            "PDNO": stock_code,
-            "ORD_DVSN": "01",  # 시장가
-            "ORD_QTY": str(quantity),
-            "ORD_UNPR": "0",
-        }
-        headers = self._headers(tr_id="VTTC0801U")
-        resp = requests.post(url, headers=headers, data=json.dumps(body), timeout=15)
-        data = resp.json()
-        return data
