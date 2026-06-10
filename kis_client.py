@@ -250,7 +250,11 @@ class KISClient:
                     "current_price": float(item.get("prpr", 0)),
                     "profit_loss_rate": float(item.get("evlu_pfls_rt", 0)),
                 })
-        cash = float(data.get("output2", [{}])[0].get("frcr_dncl_amt", 0))
+        # output2가 dict(모의투자) 또는 list(실전) 둘 다 올 수 있음
+        out2 = data.get("output2", {})
+        if isinstance(out2, list):
+            out2 = out2[0] if out2 else {}
+        cash = float(out2.get("frcr_dncl_amt", 0) or out2.get("frcr_pchs_amt1", 0))
         return {"cash": cash, "holdings": holdings}
 
     def order_us_buy(self, stock_code: str, quantity: int, exchange: str = "NAS"):
