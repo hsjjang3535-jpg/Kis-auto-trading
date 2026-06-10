@@ -21,7 +21,7 @@ ETF_KEYWORDS = ("KODEX", "TIGER", "RISE", "SOL", "PLUS", "HANARO", "KB", "KBI",
                 "KINDEX", "KBSTAR")
 
 
-def fetch_top_stocks(client: KISClient, limit=30, min_value=10_000_000_000):
+def fetch_top_stocks(client: KISClient, limit=15, min_value=10_000_000_000):
     """KIS API 거래대금 상위 조회 (FHPST01710000)"""
     url = f"{client.base_url}/uapi/domestic-stock/v1/ranking/volume-ranks"
     params = {
@@ -165,7 +165,7 @@ def run_trading_cycle():
         scan_key = f"kr_hot_stocks_{today_str}"
         if not state.get(scan_key):
             print("오늘의 핫 종목 스캔 중...")
-            hot_stocks = fetch_top_stocks(client, limit=30, min_value=10_000_000_000)
+            hot_stocks = fetch_top_stocks(client, limit=15, min_value=10_000_000_000)
             if not hot_stocks:
                 hot_stocks = [{"code": c.strip(), "name": c.strip()} for c in config.WATCHLIST if c.strip()]
                 print("폴백: KIS 스캔 실패, WATCHLIST 사용")
@@ -176,6 +176,7 @@ def run_trading_cycle():
 
         # 3. 각 종목 분석
         for stock_info in watchlist:
+            time.sleep(0.5)  # API 속도 제한 방지
             stock_code = stock_info["code"].strip()
             stock_name = stock_info.get("name", stock_code)
             if not stock_code:
@@ -316,6 +317,7 @@ def run_us_trading_cycle():
             print("US 핫 종목 스캔...")
             us_stocks = []
             for code in config.US_WATCHLIST:
+                time.sleep(0.5)  # API 속도 제한 방지
                 code = code.strip()
                 if not code:
                     continue
@@ -337,6 +339,7 @@ def run_us_trading_cycle():
         us_watchlist = state.get(scan_key, [])
 
         for stock_info in us_watchlist:
+            time.sleep(0.5)  # API 속도 제한 방지
             stock_code = stock_info["code"].strip()
             stock_name = stock_info.get("name", stock_code)
             if not stock_code:
