@@ -12,7 +12,7 @@ import pytz
 
 import config
 from kis_client import KISClient
-from strategy import analyze_minute_data, analyze_daily_data, should_buy, should_buy_oversold, should_sell
+from strategy import analyze_minute_data, analyze_daily_data, should_buy, should_buy_oversold, should_sell, should_buy_simple
 import telegram_bot
 
 # ==================== 설정 ====================
@@ -111,39 +111,45 @@ def run_monitor_cycle():
 
         print(f"[모니터] {now.strftime('%H:%M')} | 예수금: {cash:,}원 | 보유: {len(holdings)}개")
 
-        # 보유종목 있으면 매도 판정
         for stock_code, position in holdings.items():
             try:
                 api_sleep()
                 price_info = client.get_current_price(stock_code)
                 current_price = price_info["current_price"]
 
-                api_sleep()
-                minute_data = client.get_minute_candles(stock_code, period="5")
-                minute_analysis = analyze_minute_data(minute_data)
+                # 매도 판정은 단순 수익률 기준 (분봉 API 안 씀)
+                avg_price = position.get("avg_price", 0)
+                hold_qty = position.get("quantity", 0)
+                if avg_price > 0 and hold_qty > 0:
+                    profit_pct = (current_price - avg_price) / avg_price * 100
+                    stock_strategy = state.get("stock_strategy", {}).get(stock_code, "regular")
 
-                stock_strategy = state.get("stock_strategy", {}).get(stock_code, "regular")
-                if stock_strategy == "oversold":
-                    sell_flag, sell_qty, sell_reason = should_sell(
-                        position, price_info, minute_analysis,
-                        stop_loss_pct=config.OVERSOLD_STOP_LOSS_PCT,
-                        take_profit_pct=config.OVERSOLD_TAKE_PROFIT_PCT
-                    )
-                else:
-                    sell_flag, sell_qty, sell_reason = should_sell(position, price_info, minute_analysis)
+                    if stock_strategy == "oversold":
+                        sl, tp = config.OVERSOLD_STOP_LOSS_PCT, config.OVERSOLD_TAKE_PROFIT_PCT
+                    else:
+                        sl, tp = -2.5, 3.0
 
-                if sell_flag:
-                    stock_name = price_info.get("stock_name", stock_code)
-                    print(f"  -> 매도! {stock_name} {sell_reason}")
-                    resp = client.order_sell(stock_code, sell_qty)
-                    print(f"  -> 주문 응답: {resp}")
-                    state[f"kr_sell_records_{today_str}"].append({
-                        "name": stock_name, "code": stock_code,
-                        "price": current_price, "quantity": sell_qty,
-                        "profit_pct": round(position.get("profit_loss_rate", 0), 2),
-                        "reason": sell_reason, "time": now.strftime("%H:%M"),
-                    })
-                    state["buy_done_today"].pop(stock_code, None)
+                    sell_flag = False
+                    sell_reason = ""
+                    if profit_pct >= tp:
+                        sell_flag = True
+                        sell_reason = f"수익실현 ({profit_pct:+.2f}%)"
+                    elif profit_pct <= sl:
+                        sell_flag = True
+                        sell_reason = f"손절 ({profit_pct:+.2f}%)"
+
+                    if sell_flag:
+                        stock_name = price_info.get("stock_name", stock_code)
+                        print(f"  -> 매도! {stock_name} {sell_reason}")
+                        resp = client.order_sell(stock_code, hold_qty)
+                        print(f"  -> 주문 응답: {resp}")
+                        state[f"kr_sell_records_{today_str}"].append({
+                            "name": stock_name, "code": stock_code,
+                            "price": current_price, "quantity": hold_qty,
+                            "profit_pct": round(profit_pct, 2),
+                            "reason": sell_reason, "time": now.strftime("%H:%M"),
+                        })
+                        state["buy_done_today"].pop(stock_code, None)
             except Exception as e:
                 print(f"  -> 매도판정 오류 [{stock_code}]: {e}")
 
@@ -155,12 +161,58 @@ def run_monitor_cycle():
 
 # ==================== 사이클 B: 종목 분석 + 매수 (10분 주기) ====================
 
+# KIS 모의투자에서 분봉/일봉 API가 403 → 자체 가격 히스토리로 분석
+
+def record_price_history(state: Dict, stock_code: str, price_info: Dict, now_str: str):
+    """현재가를 히스토리에 기록 (5분봉 대용)"""
+    key_5m = f"hist_5m_{stock_code}"
+    key_daily = f"hist_daily_{stock_code}"
+
+    # 5분봉 히스토리 (최대 30개 보관)
+    history_5m = state.get(key_5m, [])
+    history_5m.append({
+        "time": now_str,
+        "price": price_info["current_price"],
+        "volume": price_info.get("volume", 0),
+        "trading_value": price_info.get("trading_value", 0),
+    })
+    state[key_5m] = history_5m[-30:]  # 최근 30개만 유지
+
+    # 일봉 히스토리 (날짜별 마지막 가격, 최대 60개)
+    today = now_str[:8]
+    history_daily = state.get(key_daily, [])
+    if history_daily and history_daily[-1].get("date") == today:
+        # 오늘 데이터 업데이트
+        history_daily[-1] = {
+            "date": today,
+            "open": history_daily[-1].get("open", price_info["current_price"]),
+            "close": price_info["current_price"],
+            "high": max(history_daily[-1].get("high", 0), price_info.get("high_price", price_info["current_price"])),
+            "low": min(history_daily[-1].get("low", 999999999), price_info.get("low_price", price_info["current_price"])),
+            "volume": price_info.get("volume", 0),
+            "trading_value": price_info.get("trading_value", 0),
+        }
+    else:
+        # 새 날짜
+        history_daily.append({
+            "date": today,
+            "open": price_info.get("open_price", price_info["current_price"]),
+            "close": price_info["current_price"],
+            "high": price_info.get("high_price", price_info["current_price"]),
+            "low": price_info.get("low_price", price_info["current_price"]),
+            "volume": price_info.get("volume", 0),
+            "trading_value": price_info.get("trading_value", 0),
+        })
+    state[key_daily] = history_daily[-60:]
+
+
 def run_analysis_cycle():
-    """종목 분석 + 매수 판정 (잔고조회 없이 상태파일 기반)"""
+    """종목 분석 + 매수 판정"""
     now = datetime.now(pytz.timezone(config.TIMEZONE))
     if not is_market_open(now):
         return
 
+    now_str = now.strftime("%Y%m%d%H%M")
     print(f"\n=== [분석 사이클] {now.strftime('%H:%M')} ===")
     state = load_state()
     today_str = now.strftime("%Y%m%d")
@@ -171,14 +223,13 @@ def run_analysis_cycle():
     state = _init_day_records(state, today_str, prefix="kr_")
 
     try:
-        # 1. 감시 종목 결정 (핫스캔 스킵, WATCHLIST 사용)
+        # 1. 감시 종목 결정
         scan_key = f"kr_hot_stocks_{today_str}"
         if not state.get(scan_key):
             watchlist = []
             for c in config.WATCHLIST:
                 c = c.strip()
                 if c:
-                    # 종목명 조회 (1회 API 호출)
                     api_sleep()
                     try:
                         price_info = client.get_current_price(c)
@@ -194,8 +245,7 @@ def run_analysis_cycle():
 
         watchlist = state[scan_key]
 
-        # 2. 잔고는 상태파일에서 (모니터 사이클이 업데이트)
-        # 대신 여기서 가볍게만 확인
+        # 2. 잔고 확인
         api_sleep()
         balance = client.get_balance()
         cash = balance["cash"]
@@ -207,17 +257,13 @@ def run_analysis_cycle():
             stock_name = stock_info.get("name", stock_code)
             if not stock_code:
                 continue
-
-            # 이미 보유중이면 스킵 (매도는 모니터 사이클에서)
             if stock_code in holdings:
                 continue
-
-            # 오늘 이미 매수했으면 스킵
             if state["buy_done_today"].get(stock_code, False):
                 continue
 
             try:
-                # 현재가
+                # 현재가 (API 1회)
                 api_sleep()
                 price_info = client.get_current_price(stock_code)
                 stock_name = price_info.get("stock_name", stock_name)
@@ -229,33 +275,44 @@ def run_analysis_cycle():
                     }
                     continue
 
-                # 5분봉
-                api_sleep()
-                minute_data = client.get_minute_candles(stock_code, period="5")
-                minute_analysis = analyze_minute_data(minute_data)
+                # 가격 히스토리 기록
+                record_price_history(state, stock_code, price_info, now_str)
 
-                # 일봉
-                api_sleep()
-                daily_data = client.get_daily_candles(stock_code, count=60)
-                daily_analysis = analyze_daily_data(daily_data)
+                # 분석: 자체 히스토리 사용
+                hist_5m = state.get(f"hist_5m_{stock_code}", [])
+                hist_daily = state.get(f"hist_daily_{stock_code}", [])
+
+                minute_analysis = analyze_minute_data(hist_5m)
+                daily_analysis = analyze_daily_data(hist_daily)
+
+                # 분석 데이터 충분하면 정식 전략, 아니면 간이 전략
+                if minute_analysis.get("valid") and daily_analysis.get("valid"):
+                    buy_flag, buy_qty, buy_reason = should_buy(
+                        price_info, minute_analysis, daily_analysis, config.MAX_BUDGET_PER_STOCK
+                    )
+                    strategy = "regular"
+
+                    if not buy_flag:
+                        buy_flag, buy_qty, buy_reason = should_buy_oversold(
+                            price_info, minute_analysis, daily_analysis, config.MAX_BUDGET_PER_STOCK
+                        )
+                        strategy = "oversold"
+                else:
+                    # 간이 전략 (현재가 정보만으로 판단)
+                    buy_flag, buy_qty, buy_reason = should_buy_simple(price_info, config.MAX_BUDGET_PER_STOCK)
+                    strategy = "simple"
+                    data_note = f"(5분:{len(hist_5m)}개/일봉:{len(hist_daily)}개)"
+                    if not buy_flag:
+                        buy_reason = f"{buy_reason} {data_note}"
+                    else:
+                        buy_reason = f"{buy_reason} {data_note}"
 
                 print(f"  [{stock_name}] {current_price:,}원 | "
                       f"MA5: {minute_analysis.get('ma5')} | "
                       f"vol_spike: {minute_analysis.get('volume_spike')} | "
                       f"일양봉: {daily_analysis.get('is_positive')} | "
-                      f"RSI: {daily_analysis.get('rsi')}")
-
-                # 매수 판정
-                buy_flag, buy_qty, buy_reason = should_buy(
-                    price_info, minute_analysis, daily_analysis, config.MAX_BUDGET_PER_STOCK
-                )
-                strategy = "regular"
-
-                if not buy_flag:
-                    buy_flag, buy_qty, buy_reason = should_buy_oversold(
-                        price_info, minute_analysis, daily_analysis, config.MAX_BUDGET_PER_STOCK
-                    )
-                    strategy = "oversold"
+                      f"RSI: {daily_analysis.get('rsi')} | "
+                      f"전략: {strategy}")
 
                 if buy_flag:
                     print(f"    -> 매수! [{strategy}] {buy_reason} | {buy_qty}주")

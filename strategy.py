@@ -60,17 +60,30 @@ def count_consecutive_drops(closes: List[float]) -> int:
 
 
 def analyze_minute_data(minute_data: List[Dict]) -> Dict[str, Any]:
-    """
-    5분봉 데이터를 바탕으로 기술적 분석
-    """
+    """5분봉 데이터를 바탕으로 기술적 분석 (KIS API 또는 자체 기록)"""
     if not minute_data or len(minute_data) < 5:
         return {"valid": False, "reason": "데이터 부족"}
 
-    closes = [int(item.get("stck_prpr", 0)) for item in minute_data]
-    closes.reverse()  # 오래된 → 최신순
+    # 자체 기록 형식 {"price": ..., "volume": ...} 또는 KIS 형식 모두 지원
+    closes = []
+    volumes = []
+    for item in minute_data:
+        if "price" in item:
+            closes.append(int(item["price"]))
+            volumes.append(int(item.get("volume", 0)))
+        elif "stck_prpr" in item:
+            closes.append(int(item["stck_prpr"]))
+            volumes.append(int(item.get("cntg_vol", 0)))
+        else:
+            continue
 
-    volumes = [int(item.get("cntg_vol", 0)) for item in minute_data]
-    volumes.reverse()
+    if len(closes) < 5:
+        return {"valid": False, "reason": "유효 데이터 부족"}
+
+    # 오래된 → 최신순 정렬 (자체 기록은 이미 정렬됨)
+    if minute_data and "stck_prpr" in minute_data[0]:
+        closes.reverse()
+        volumes.reverse()
 
     ma5 = calc_sma(closes, 5)
     ma10 = calc_sma(closes, 10)
@@ -80,8 +93,8 @@ def analyze_minute_data(minute_data: List[Dict]) -> Dict[str, Any]:
     vol_ma20 = calc_sma(volumes, 20)
 
     latest_close = closes[-1]
-    prev_close = closes[-2]
-    latest_volume = volumes[-1]
+    prev_close = closes[-2] if len(closes) >= 2 else latest_close
+    latest_volume = volumes[-1] if volumes else 0
 
     recent_closes = closes[-10:]
     recent_low = min(recent_closes)
@@ -100,7 +113,7 @@ def analyze_minute_data(minute_data: List[Dict]) -> Dict[str, Any]:
         "latest_volume": latest_volume,
         "vol_ma5": vol_ma5,
         "vol_ma20": vol_ma20,
-        "volume_spike": latest_volume > vol_ma5 * 1.5 if vol_ma5 else False,
+        "volume_spike": latest_volume > vol_ma5 * 1.5 if vol_ma5 and latest_volume else False,
         "recent_low": recent_low,
         "recent_high": recent_high,
         "pullback_pct": (latest_close - recent_high) / recent_high * 100 if recent_high else 0,
@@ -109,49 +122,65 @@ def analyze_minute_data(minute_data: List[Dict]) -> Dict[str, Any]:
 
 
 def analyze_daily_data(daily_data: List[Dict]) -> Dict[str, Any]:
-    """
-    일봉 데이터 분석 + RSI, 볼린저밴드, 연속하락 추가
-    """
+    """일봉 데이터 분석 (KIS API 또는 자체 기록)"""
     if not daily_data or len(daily_data) < 5:
         return {"valid": False, "reason": "일봉 데이터 부족"}
 
-    # 최신순 정렬
-    daily_data.sort(key=lambda x: x.get("stck_bsop_date", ""), reverse=True)
+    # 자체 기록 형식 또는 KIS 형식 지원
+    closes = []
+    opens = []
+    volumes = []
+    trading_values = []
 
-    closes = [int(item.get("stck_clpr", 0)) for item in daily_data]
-    opens = [int(item.get("stck_oprc", 0)) for item in daily_data]
-    volumes = [int(item.get("acml_vol", 0)) for item in daily_data]
-    trading_values = [int(item.get("acml_tr_pbmn", 0)) for item in daily_data]
+    for item in daily_data:
+        if "close" in item:
+            closes.append(int(item["close"]))
+            opens.append(int(item.get("open", item["close"])))
+            volumes.append(int(item.get("volume", 0)))
+            trading_values.append(int(item.get("trading_value", 0)))
+        elif "stck_clpr" in item:
+            closes.append(int(item["stck_clpr"]))
+            opens.append(int(item.get("stck_oprc", 0)))
+            volumes.append(int(item.get("acml_vol", 0)))
+            trading_values.append(int(item.get("acml_tr_pbmn", 0)))
+        else:
+            continue
 
-    ma5 = calc_sma(closes, 5)
-    ma20 = calc_sma(closes, 20)
-    ma60 = calc_sma(closes, 60)
+    if len(closes) < 5:
+        return {"valid": False, "reason": "유효 데이터 부족"}
 
-    latest_close = closes[0]
-    latest_open = opens[0]
-    latest_value = trading_values[0]
-    prev_close = closes[1] if len(closes) > 1 else latest_close
-    prev_volume = volumes[1] if len(volumes) > 1 else 0
-    latest_volume = volumes[0]
+    # 최신순 (index 0 = 최신)
+    closes_desc = list(reversed(closes))
+    opens_desc = list(reversed(opens))
+
+    ma5 = calc_sma(closes_desc, 5)
+    ma20 = calc_sma(closes_desc, 20)
+    ma60 = calc_sma(closes_desc, 60)
+
+    latest_close = closes_desc[0]
+    latest_open = opens_desc[0]
+    latest_value = trading_values[-1] if trading_values else 0
+    prev_close = closes_desc[1] if len(closes_desc) > 1 else latest_close
+    prev_volume = volumes[-2] if len(volumes) >= 2 else 0
+    latest_volume = volumes[-1] if volumes else 0
 
     vol_rate = (latest_volume / prev_volume * 100) if prev_volume > 0 else 0
     is_positive = latest_close > prev_close
 
-    # === 추가 지표 ===
-    # RSI (시간순으로 변환)
-    closes_chrono = [float(c) for c in reversed(closes)]
+    # RSI
+    closes_chrono = [float(c) for c in closes]  # 오래된→최신 (원본 순서)
     rsi = calc_rsi(closes_chrono, 14)
 
     # 볼린저밴드
     bb_upper, bb_mid, bb_lower = calc_bollinger(closes_chrono, 20)
 
-    # 연속 하락 일수
+    # 연속 하락
     consecutive_drops = count_consecutive_drops(closes_chrono)
 
-    # 도지 캔들 (시가와 종가 차이 < 0.5%)
+    # 도지
     is_doji = abs(latest_close - latest_open) / max(latest_open, 1) < 0.005
 
-    # 반전 신호: N일 연속 하락 후 오늘 양봉 또는 도지
+    # 반전 신호
     reversal_signal = consecutive_drops >= 3 and (is_positive or is_doji)
 
     return {
@@ -168,7 +197,6 @@ def analyze_daily_data(daily_data: List[Dict]) -> Dict[str, Any]:
         "price_above_ma20": latest_close > ma20 if ma20 else False,
         "ma_bullish": ma5 > ma20 if ma5 and ma20 else False,
         "vol_rate": vol_rate,
-        # 새 지표
         "rsi": rsi,
         "bb_upper": bb_upper,
         "bb_mid": bb_mid,
@@ -178,9 +206,35 @@ def analyze_daily_data(daily_data: List[Dict]) -> Dict[str, Any]:
     }
 
 
+def analyze_price_simple(price_info: Dict) -> Dict[str, Any]:
+    """현재가 정보만으로 간단 분석 (분봉/일봉 없을 때 사용)"""
+    current_price = price_info.get("current_price", 0)
+    prev_close = price_info.get("prev_close", 0)
+    open_price = price_info.get("open_price", 0)
+    change_rate = price_info.get("change_rate", 0)
+    volume = price_info.get("volume", 0)
+    trading_value = price_info.get("trading_value", 0)
+
+    if current_price <= 0:
+        return {"valid": False, "reason": "가격 없음"}
+
+    return {
+        "valid": True,
+        "current_price": current_price,
+        "prev_close": prev_close,
+        "open_price": open_price,
+        "change_rate": change_rate,
+        "volume": volume,
+        "trading_value": trading_value,
+        "is_positive": current_price > prev_close if prev_close > 0 else None,
+        "gap_from_open": (current_price - open_price) / open_price * 100 if open_price > 0 else 0,
+        "daily_change_pct": change_rate,
+    }
+
+
 def should_buy(price_info: Dict, minute_analysis: Dict, daily_analysis: Dict, budget: int) -> tuple:
     """
-    매수 판정: 종산TV 3대 기법을 결합 (상승장용)
+    매수 판정: 상승장 기법 (분석 데이터 있을 때)
     """
     if not minute_analysis.get("valid") or not daily_analysis.get("valid"):
         return False, 0, "분석 데이터 부족"
@@ -190,10 +244,7 @@ def should_buy(price_info: Dict, minute_analysis: Dict, daily_analysis: Dict, bu
     if current_price <= 0:
         return False, 0, "가격 정보 없음"
 
-    # === 1. 종가베팅 필터 ===
-    prev_close = daily_analysis["prev_close"]
-    gap_pct = (current_price - prev_close) / prev_close * 100 if prev_close else 0
-
+    # === 1. 거래대금 필터 ===
     if daily_analysis["latest_trading_value"] < 10_000_000_000:
         return False, 0, f"거래대금 부족 ({daily_analysis['latest_trading_value'] / 1_000_000_000:.0f}억)"
 
@@ -229,6 +280,8 @@ def should_buy(price_info: Dict, minute_analysis: Dict, daily_analysis: Dict, bu
     elif bounce > 1:
         reasons.append(f"저점 돌파 반등 ({bounce:.1f}%)")
 
+    prev_close = daily_analysis["prev_close"]
+    gap_pct = (current_price - prev_close) / prev_close * 100 if prev_close else 0
     if gap_pct > 20:
         return False, 0, f"과도한 급등 ({gap_pct:.1f}%)"
 
@@ -238,13 +291,54 @@ def should_buy(price_info: Dict, minute_analysis: Dict, daily_analysis: Dict, bu
     return True, quantity, "[상승] " + "; ".join(reasons)
 
 
+def should_buy_simple(price_info: Dict, budget: int) -> tuple:
+    """
+    매수 판정: 간단 버전 (분봉/일봉 없을 때 - 모의투자 폴백)
+    조건:
+    - 상승률 +1% ~ +10% (적당한 상승)
+    - 거래대금 50억 이상
+    - 시가 대비 양수
+    """
+    current_price = price_info.get("current_price", 0)
+    if current_price <= 0:
+        return False, 0, "가격 없음"
+
+    change_rate = price_info.get("change_rate", 0)
+    trading_value = price_info.get("trading_value", 0)
+    open_price = price_info.get("open_price", 0)
+    prev_close = price_info.get("prev_close", 0)
+
+    reasons = []
+
+    # 상승률 체크
+    if change_rate < 1.0:
+        return False, 0, f"상승률 낮음 ({change_rate:+.1f}%)"
+    if change_rate > 10.0:
+        return False, 0, f"과급등 위험 ({change_rate:+.1f}%)"
+    reasons.append(f"상승률 {change_rate:+.1f}%")
+
+    # 거래대금 체크
+    if trading_value < 5_000_000_000:
+        return False, 0, f"거래대금 부족 ({trading_value / 1_000_000_000:.0f}억)"
+    reasons.append(f"거래대금 {trading_value / 1_000_000_000:.0f}억")
+
+    # 시가 대비 상승 (장중 흐름 확인)
+    gap_from_open = (current_price - open_price) / open_price * 100 if open_price > 0 else 0
+    if gap_from_open < -1.0:
+        return False, 0, f"시가 대비 하락 ({gap_from_open:+.1f}%)"
+    reasons.append(f"시가대비 {gap_from_open:+.1f}%")
+
+    max_qty = int(budget * 0.95 / current_price)
+    if max_qty <= 0:
+        return False, 0, f"예산 부족 (가격: {current_price:,}원)"
+    quantity = max(1, max_qty)
+
+    return True, quantity, "[간이] " + "; ".join(reasons)
+
+
 def should_buy_oversold(price_info: Dict, minute_analysis: Dict, daily_analysis: Dict, budget: int) -> tuple:
     """
-    매수 판정: 과매도 반등 + 눌림목 강화 (하락장용)
-    조건:
-    - RSI < 30 (과매도)
-    - 거래대금 50억 이상
-    - 반등 신호 (거래량 2배 OR BB 하단 터치 OR 3일+ 하락 후 반전)
+    매수 판정: 과매도 반등 (하락장용)
     """
     if not minute_analysis.get("valid") or not daily_analysis.get("valid"):
         return False, 0, "분석 데이터 부족"
@@ -255,53 +349,43 @@ def should_buy_oversold(price_info: Dict, minute_analysis: Dict, daily_analysis:
 
     reasons = []
 
-    # === 1. RSI 과매도 (필수) ===
     rsi = daily_analysis.get("rsi")
     if rsi is None or rsi >= 30:
         return False, 0, f"RSI 과매도 아님 ({rsi:.1f})" if rsi else "RSI 데이터 없음"
     reasons.append(f"RSI 과매도 ({rsi:.1f})")
 
-    # === 2. 거래대금 50억 이상 ===
     if daily_analysis["latest_trading_value"] < 5_000_000_000:
         return False, 0, f"거래대금 부족 ({daily_analysis['latest_trading_value'] / 1_000_000_000:.0f}억)"
     reasons.append(f"거래대금 {daily_analysis['latest_trading_value'] / 1_000_000_000:.0f}억")
 
-    # === 3. 반등 신호 (최소 1개 필요) ===
     bounce_signals = 0
-
-    # 3a. 거래량 2배 이상 급증
     vol_rate = daily_analysis.get("vol_rate", 0)
     if vol_rate >= 200:
         bounce_signals += 1
         reasons.append(f"거래량 급증 ({vol_rate:.0f}%)")
 
-    # 3b. 볼린저밴드 하단 터치
     bb_lower = daily_analysis.get("bb_lower")
     if bb_lower and current_price <= bb_lower:
         bounce_signals += 1
         reasons.append("BB 하단 터치")
 
-    # 3c. 3일+ 연속 하락 후 반전 (양봉/도지)
     if daily_analysis.get("reversal_signal"):
         drop_days = daily_analysis.get("consecutive_drops", 0)
         bounce_signals += 1
         reasons.append(f"{drop_days}일 하락 후 반전")
 
-    # 3d. 분봉 거래량 터짐 (추가 가점)
     if minute_analysis.get("volume_spike"):
         bounce_signals += 1
         reasons.append("분봉 거래량 터짐")
 
     if bounce_signals == 0:
-        return False, 0, "반등 신호 없음 (vol<2배, BB 위, 반전X)"
+        return False, 0, "반등 신호 없음"
 
-    # === 4. 과도한 급등 제외 ===
     prev_close = daily_analysis["prev_close"]
     gap_pct = (current_price - prev_close) / prev_close * 100 if prev_close else 0
     if gap_pct > 20:
         return False, 0, f"과도한 급등 ({gap_pct:.1f}%)"
 
-    # 수량 계산
     max_qty = int(budget * 0.95 / current_price)
     quantity = max(1, max_qty)
 
@@ -322,15 +406,13 @@ def should_sell(position: Dict, price_info: Dict, minute_analysis: Dict,
 
     profit_pct = (current_price - avg_price) / avg_price * 100
 
-    # 수익실현 달성
     if profit_pct >= take_profit_pct:
         return True, hold_qty, f"수익실현 달성 ({profit_pct:+.2f}%)"
 
-    # 손절 라인
     if profit_pct <= stop_loss_pct:
         return True, hold_qty, f"손절 라인 터치 ({profit_pct:+.2f}%)"
 
-    # 5봉선 이하 하락: 추세 약화 시 방어
+    # 5봉선 이하 하락 (분석 데이터 있을 때만)
     if minute_analysis.get("valid") and not minute_analysis.get("price_above_ma5", True):
         return True, hold_qty, "5봉선 이하 하락 (추세 약화)"
 
