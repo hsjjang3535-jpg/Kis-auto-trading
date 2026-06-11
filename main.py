@@ -689,13 +689,13 @@ if config.US_ENABLED:
 scheduler.add_job(
     run_monitor_cycle,
     trigger="date",
-    run_date=datetime.now() + timedelta(seconds=10),
+    run_date=datetime.now() + timedelta(seconds=15),
     id="initial_monitor",
 )
 scheduler.add_job(
     run_analysis_cycle,
     trigger="date",
-    run_date=datetime.now() + timedelta(seconds=20),
+    run_date=datetime.now() + timedelta(seconds=90),
     id="initial_analysis",
 )
 
@@ -744,3 +744,18 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
+
+def api_call_with_retry(fn, *args, max_retries=2, **kwargs):
+    """API 호출 래퍼 - 속도제한 시 재시도"""
+    for attempt in range(max_retries + 1):
+        try:
+            api_sleep()
+            return fn(*args, **kwargs)
+        except Exception as e:
+            err_str = str(e)
+            if "EGW00201" in err_str or "EGW00002" in err_str or "초당 거래건수" in err_str:
+                if attempt < max_retries:
+                    print(f"    속도제한 감지, {3*(attempt+1)}초 대기 후 재시도 ({attempt+1}/{max_retries})")
+                    time.sleep(3 * (attempt + 1))
+                    continue
+            raise
