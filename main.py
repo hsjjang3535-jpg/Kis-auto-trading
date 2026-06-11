@@ -165,7 +165,20 @@ def run_trading_cycle():
         scan_key = f"kr_hot_stocks_{today_str}"
         if not state.get(scan_key):
             print("오늘의 핫 종목 스캔 중...")
+            hot_stocks = []
+            # 1차: 기본 거래대금으로 시도
             hot_stocks = fetch_top_stocks(client, limit=15, min_value=10_000_000_000)
+            # 2차: 빈응답 시 거래대금 기준 완화 (100억→50억)
+            if not hot_stocks:
+                print("핫종목 스캔 빈응답, 거래대금 기준 완화 (50억)로 재시도...")
+                time.sleep(1)
+                hot_stocks = fetch_top_stocks(client, limit=15, min_value=5_000_000_000)
+            # 3차: 여전히 빈응답 시 거래대금 기준 더 완화 (10억)
+            if not hot_stocks:
+                print("핫종목 스캔 빈응답, 거래대금 기준 완화 (10억)로 재시도...")
+                time.sleep(1)
+                hot_stocks = fetch_top_stocks(client, limit=15, min_value=1_000_000_000)
+            # 최종 폴백: WATCHLIST 사용
             if not hot_stocks:
                 hot_stocks = [{"code": c.strip(), "name": c.strip()} for c in config.WATCHLIST if c.strip()]
                 print("폴백: KIS 스캔 실패, WATCHLIST 사용")
@@ -176,7 +189,6 @@ def run_trading_cycle():
 
         # 3. 각 종목 분석
         for stock_info in watchlist:
-            time.sleep(0.5)  # API 속도 제한 방지
             stock_code = stock_info["code"].strip()
             stock_name = stock_info.get("name", stock_code)
             if not stock_code:
@@ -184,15 +196,18 @@ def run_trading_cycle():
 
             try:
                 # 현재가
+                time.sleep(0.4)
                 price_info = client.get_current_price(stock_code)
                 stock_name = price_info.get("stock_name", stock_name)
                 current_price = price_info["current_price"]
 
                 # 5분봉 데이터
+                time.sleep(0.4)
                 minute_data = client.get_minute_candles(stock_code, period="5")
                 minute_analysis = analyze_minute_data(minute_data)
 
                 # 일봉 데이터
+                time.sleep(0.4)
                 daily_data = client.get_daily_candles(stock_code, count=60)
                 daily_analysis = analyze_daily_data(daily_data)
 
@@ -316,14 +331,15 @@ def run_us_trading_cycle():
         if not state.get(scan_key):
             print("US 핫 종목 스캔...")
             us_stocks = []
+            # 1차: 거래대금 $10M 이상
             for code in config.US_WATCHLIST:
-                time.sleep(0.5)  # API 속도 제한 방지
+                time.sleep(0.5)
                 code = code.strip()
                 if not code:
                     continue
                 try:
                     price = client.get_us_price(code, exchange=config.US_EXCHANGE)
-                    if price["trading_value"] >= 10_000_000:  # $10M
+                    if price["trading_value"] >= 10_000_000:
                         us_stocks.append({
                             "code": code,
                             "name": price["stock_name"],
@@ -333,28 +349,55 @@ def run_us_trading_cycle():
                         })
                 except Exception as e:
                     continue
+            # 2차: 빈응답 시 거래대금 기준 완화 ($1M)
+            if not us_stocks:
+                print("US 스캔 빈응답, 거래대금 기준 완화 ($1M)로 재시도...")
+                time.sleep(1)
+                for code in config.US_WATCHLIST:
+                    time.sleep(0.5)
+                    code = code.strip()
+                    if not code:
+                        continue
+                    try:
+                        price = client.get_us_price(code, exchange=config.US_EXCHANGE)
+                        if price["trading_value"] >= 1_000_000:
+                            us_stocks.append({
+                                "code": code,
+                                "name": price["stock_name"],
+                                "price": price["current_price"],
+                                "change_rate": price["change_rate"],
+                                "value": price["trading_value"],
+                            })
+                    except Exception as e:
+                        continue
+            # 최종 폴백: 모든 WATCHLIST 종목 포함
+            if not us_stocks:
+                us_stocks = [{"code": c.strip(), "name": c.strip()} for c in config.US_WATCHLIST if c.strip()]
+                print("폴백: US 스캔 실패, US_WATCHLIST 전체 사용")
             state[scan_key] = us_stocks
             print(f"US 감시 종목: {len(us_stocks)}개")
 
         us_watchlist = state.get(scan_key, [])
 
         for stock_info in us_watchlist:
-            time.sleep(0.5)  # API 속도 제한 방지
             stock_code = stock_info["code"].strip()
             stock_name = stock_info.get("name", stock_code)
             if not stock_code:
                 continue
 
             try:
+                time.sleep(0.4)
                 price_info = client.get_us_price(stock_code, exchange=config.US_EXCHANGE)
                 stock_name = price_info.get("stock_name", stock_name)
                 current_price = price_info["current_price"]
 
                 # 5분봉
+                time.sleep(0.4)
                 minute_data = client.get_us_minute(stock_code, exchange=config.US_EXCHANGE, period="5")
                 minute_analysis = analyze_minute_data(minute_data)
 
                 # 일봉
+                time.sleep(0.4)
                 daily_data = client.get_us_daily(stock_code, exchange=config.US_EXCHANGE, count=60)
                 daily_analysis = analyze_daily_data(daily_data)
 
