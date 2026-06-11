@@ -23,50 +23,54 @@ ETF_KEYWORDS = ("KODEX", "TIGER", "RISE", "SOL", "PLUS", "HANARO", "KB", "KBI",
 
 def fetch_top_stocks(client: KISClient, limit=15, min_value=10_000_000_000):
     """KIS API 거래대금 상위 조회 (FHPST01710000)"""
-    url = f"{client.base_url}/uapi/domestic-stock/v1/ranking/volume-ranks"
-    params = {
-        "FID_COND_MRKT_DIV_CODE": "J",
-        "FID_RANK_SORT_CLS_CODE": "2",  # 2=거래대금
-        "FID_INPUT_ISCD": "0000",
-        "FID_DIV_CLS_CODE": "0",
-        "FID_TRGT_CLS_CODE": "0",
-        "FID_BLNG_CLS_CODE": "0",
-        "FID_TRGT_EXLS_CLS_CODE": "0",
-        "FID_INPUT_PRICE_1": "0",
-        "FID_INPUT_PRICE_2": "0",
-        "FID_VOL_CNT": "0",
-    }
-    headers = {
-        "content-type": "application/json",
-        "authorization": f"Bearer {client._get_token()}",
-        "appkey": client.app_key,
-        "appsecret": client.app_secret,
-        "tr_id": "FHPST01710000",
-    }
-    r = requests.get(url, headers=headers, params=params, timeout=15)
-    d = r.json()
-    if d.get("rt_cd") != "0":
-        print(f"KIS 상위조회 실패: {d}")
-        return []
+    try:
+        url = f"{client.base_url}/uapi/domestic-stock/v1/ranking/volume-ranks"
+        params = {
+            "FID_COND_MRKT_DIV_CODE": "J",
+            "FID_RANK_SORT_CLS_CODE": "2",  # 2=거래대금
+            "FID_INPUT_ISCD": "0000",
+            "FID_DIV_CLS_CODE": "0",
+            "FID_TRGT_CLS_CODE": "0",
+            "FID_BLNG_CLS_CODE": "0",
+            "FID_TRGT_EXLS_CLS_CODE": "0",
+            "FID_INPUT_PRICE_1": "0",
+            "FID_INPUT_PRICE_2": "0",
+            "FID_VOL_CNT": "0",
+        }
+        headers = {
+            "content-type": "application/json",
+            "authorization": f"Bearer {client._get_token()}",
+            "appkey": client.app_key,
+            "appsecret": client.app_secret,
+            "tr_id": "FHPST01710000",
+        }
+        r = requests.get(url, headers=headers, params=params, timeout=15)
+        d = r.json()
+        if d.get("rt_cd") != "0":
+            print(f"KIS 상위조회 실패: {d}")
+            return []
 
-    stocks = []
-    for item in d.get("output", []):
-        code = item.get("mksc_shrn_iscd", "")
-        name = item.get("hts_kor_isnm", "")
-        if not code or len(code) != 6:
-            continue
-        # ETF 필터
-        if any(name.startswith(k) for k in ETF_KEYWORDS):
-            continue
-        # 거래대금 파싱
-        try:
-            value = int(item.get("acml_tr_pbmn", 0))
-        except:
-            continue
-        if value < min_value:
-            continue
-        stocks.append({"code": code, "name": name, "trading_value": value})
-    return stocks[:limit]
+        stocks = []
+        for item in d.get("output", []):
+            code = item.get("mksc_shrn_iscd", "")
+            name = item.get("hts_kor_isnm", "")
+            if not code or len(code) != 6:
+                continue
+            # ETF 필터
+            if any(name.startswith(k) for k in ETF_KEYWORDS):
+                continue
+            # 거래대금 파싱
+            try:
+                value = int(item.get("acml_tr_pbmn", 0))
+            except:
+                continue
+            if value < min_value:
+                continue
+            stocks.append({"code": code, "name": name, "trading_value": value})
+        return stocks[:limit]
+    except Exception as e:
+        print(f"fetch_top_stocks 오류: {e}")
+        return []
 
 
 app = FastAPI()
