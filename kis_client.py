@@ -62,7 +62,7 @@ class KISClient:
         output = data.get("output", {})
         return {
             "stock_code": stock_code,
-            "stock_name": output.get("hts_kor_isnm", ""),
+            "stock_name": output.get("hts_kor_isnm", "") or config.STOCK_NAMES.get(stock_code, stock_code),
             "current_price": int(output.get("stck_prpr", 0)),
             "open_price": int(output.get("stck_oprc", 0)),
             "high_price": int(output.get("stck_hgpr", 0)),
@@ -194,7 +194,7 @@ class KISClient:
         output = data.get("output", {})
         return {
             "stock_code": stock_code,
-            "stock_name": output.get("hts_kor_isnm", ""),
+            "stock_name": output.get("hts_kor_isnm", "") or config.STOCK_NAMES.get(stock_code, stock_code),
             "current_price": float(output.get("last", 0)),
             "open_price": float(output.get("open", 0)),
             "high_price": float(output.get("high", 0)),
