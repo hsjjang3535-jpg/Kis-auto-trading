@@ -4,6 +4,18 @@ import time
 from datetime import datetime, timezone, timedelta
 import config
 
+
+def _int(value, default=0):
+    """KIS API 응답을 안전하게 int로 변환 (소수점 문자열 처리)"""
+    try:
+        if isinstance(value, (int, float)):
+            return int(value)
+        if isinstance(value, str):
+            return int(float(value))
+        return default
+    except (ValueError, TypeError):
+        return default
+
 class KISClient:
     def __init__(self):
         self.base_url = config.KIS_BASE_URL
@@ -63,14 +75,14 @@ class KISClient:
         return {
             "stock_code": stock_code,
             "stock_name": output.get("hts_kor_isnm", "") or config.STOCK_NAMES.get(stock_code, stock_code),
-            "current_price": int(output.get("stck_prpr", 0)),
-            "open_price": int(output.get("stck_oprc", 0)),
-            "high_price": int(output.get("stck_hgpr", 0)),
-            "low_price": int(output.get("stck_lwpr", 0)),
-            "prev_close": int(output.get("stck_prdy_clpr", 0)),
+            "current_price": _int(output.get("stck_prpr", 0)),
+            "open_price": _int(output.get("stck_oprc", 0)),
+            "high_price": _int(output.get("stck_hgpr", 0)),
+            "low_price": _int(output.get("stck_lwpr", 0)),
+            "prev_close": _int(output.get("stck_prdy_clpr", 0)),
             "change_rate": float(output.get("prdy_ctrt", 0)),
-            "volume": int(output.get("acml_vol", 0)),
-            "trading_value": int(output.get("acml_tr_pbmn", 0)),
+            "volume": _int(output.get("acml_vol", 0)),
+            "trading_value": _int(output.get("acml_tr_pbmn", 0)),
         }
 
     def get_minute_candles(self, stock_code: str, period="5"):
@@ -135,16 +147,16 @@ class KISClient:
                 holdings.append({
                     "stock_code": item["pdno"],
                     "stock_name": item.get("prdt_name", ""),
-                    "quantity": int(item.get("hldg_qty", 0)),
-                    "avg_price": int(item.get("pchs_avg_pric", 0)),
-                    "current_price": int(item.get("prpr", 0)),
-                    "eval_amount": int(item.get("evlu_amt", 0)),
+                    "quantity": _int(item.get("hldg_qty", 0)),
+                    "avg_price": _int(item.get("pchs_avg_pric", 0)),
+                    "current_price": _int(item.get("prpr", 0)),
+                    "eval_amount": _int(item.get("evlu_amt", 0)),
                     "profit_loss_rate": float(item.get("evlu_pfls_rt", 0)),
                 })
         # 예수금
         cash = 0
         for item in data.get("output2", []):
-            cash = int(item.get("dnca_tot_amt", 0))
+            cash = _int(item.get("dnca_tot_amt", 0))
         return {"cash": cash, "holdings": holdings}
 
     def order_buy(self, stock_code: str, quantity: int):
@@ -201,8 +213,8 @@ class KISClient:
             "low_price": float(output.get("low", 0)),
             "prev_close": float(output.get("base", 0)),
             "change_rate": float(output.get("rate", 0)),
-            "volume": int(output.get("tvol", 0)),
-            "trading_value": int(output.get("tamt", 0)),
+            "volume": _int(output.get("tvol", 0)),
+            "trading_value": _int(output.get("tamt", 0)),
         }
 
     def get_us_daily(self, stock_code: str, exchange: str = "NAS", count=60):
@@ -245,7 +257,7 @@ class KISClient:
                 holdings.append({
                     "stock_code": item["pdno"],
                     "stock_name": item.get("prdt_name", ""),
-                    "quantity": int(item.get("ovrs_cblc_qty", 0)),
+                    "quantity": _int(item.get("ovrs_cblc_qty", 0)),
                     "avg_price": float(item.get("pchs_avg_pric", 0)),
                     "current_price": float(item.get("prpr", 0)),
                     "profit_loss_rate": float(item.get("evlu_pfls_rt", 0)),
