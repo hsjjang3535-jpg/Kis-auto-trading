@@ -19,10 +19,12 @@ import notifier
 
 load_dotenv()
 
-MAX_BUY_AMOUNT = int(os.getenv("MAX_BUY_AMOUNT", "100000"))
+MAX_BUY_AMOUNT = int(os.getenv("MAX_BUY_AMOUNT", "500000"))
+MAX_TOTAL_AMOUNT = int(os.getenv("MAX_TOTAL_AMOUNT", "1000000"))
 
-# 매수한 종목 기록 (당일 유지)
+# 당일 매수한 종목 기록 (봇이 직접 매수한 것만 추적)
 _bought_today: list[dict] = []
+_total_invested_today: int = 0
 
 
 def is_trading_day() -> bool:
@@ -77,25 +79,41 @@ def run_buy() -> None:
         notifier.send("ℹ️ 오늘 매수 대상 없음")
         return
 
+    global _total_invested_today
+
+    # 오늘 이미 최대 한도 소진 시 중단
+    if _total_invested_today >= MAX_TOTAL_AMOUNT:
+        notifier.send(f"⛔ 오늘 최대 예수금 한도 {MAX_TOTAL_AMOUNT:,}원 도달. 추가 매수 없음")
+        return
+
     # 안전장치: 최대 2종목만 매수
     targets = _screening_result[:2]
 
     for stock in targets:
         try:
+            # 남은 한도 계산
+            remaining = MAX_TOTAL_AMOUNT - _total_invested_today
+            buy_amount = min(MAX_BUY_AMOUNT, remaining)
+            if buy_amount <= 0:
+                notifier.send(f"⛔ 예수금 한도 초과로 {stock['name']} 매수 건너뜀")
+                break
+
             price_info = kis_api.get_stock_info(stock["code"])
             current_price = int(price_info.get("stck_prpr", 0))
             if current_price == 0:
                 continue
 
-            quantity = MAX_BUY_AMOUNT // current_price
+            quantity = buy_amount // current_price
             if quantity < 1:
-                notifier.send(f"⚠️ {stock['name']}: 잔고 부족 (현재가 {current_price:,}원)")
+                notifier.send(f"⚠️ {stock['name']}: 금액 부족 (현재가 {current_price:,}원, 가용 {buy_amount:,}원)")
                 continue
 
             result = kis_api.buy_stock(stock["code"], quantity)
             rt_cd = result.get("rt_cd", "")
 
             if rt_cd == "0":
+                invested = quantity * current_price
+                _total_invested_today += invested
                 _bought_today.append({
                     "code": stock["code"],
                     "name": stock["name"],
@@ -114,26 +132,23 @@ def run_buy() -> None:
 
 
 def run_sell() -> None:
-    """09:01 - 보유 종목 시초가 매도"""
+    """09:01 - 봇이 직접 매수한 종목만 시초가 매도"""
     if not is_trading_day():
         return
 
     print(f"\n[{datetime.now().strftime('%H:%M:%S')}] 매도 실행")
 
-    try:
-        holdings = kis_api.get_holdings()
-    except Exception as e:
-        notifier.notify_error(f"잔고 조회 오류: {e}")
+    if not _bought_today:
+        print("[매도] 봇이 매수한 종목 없음. 기존 보유 종목은 건드리지 않음.")
         return
 
-    for h in holdings:
-        code = h.get("pdno", "")
-        name = h.get("prdt_name", code)
-        quantity = int(h.get("hldg_qty", 0))
-        avg_price = float(h.get("pchs_avg_pric", 0))
+    global _total_invested_today
 
-        if quantity < 1:
-            continue
+    for stock in _bought_today:
+        code = stock["code"]
+        name = stock["name"]
+        quantity = stock["quantity"]
+        buy_price = stock["buy_price"]
 
         try:
             result = kis_api.sell_stock(code, quantity)
@@ -141,8 +156,8 @@ def run_sell() -> None:
 
             if rt_cd == "0":
                 price_info = kis_api.get_stock_info(code)
-                current = float(price_info.get("stck_prpr", avg_price))
-                profit_pct = (current - avg_price) / avg_price * 100 if avg_price else 0
+                current = float(price_info.get("stck_prpr", buy_price))
+                profit_pct = (current - buy_price) / buy_price * 100 if buy_price else 0
                 notifier.notify_sell(name, code, quantity, profit_pct)
             else:
                 msg = result.get("msg1", "알 수 없는 오류")
@@ -152,6 +167,10 @@ def run_sell() -> None:
             notifier.notify_error(f"{name} 매도 오류: {e}")
 
         time.sleep(0.5)
+
+    # 당일 매수 기록 초기화
+    _bought_today.clear()
+    _total_invested_today = 0
 
 
 def main():
