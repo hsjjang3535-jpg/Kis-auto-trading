@@ -35,6 +35,29 @@ def is_trading_day() -> bool:
     return datetime.now().weekday() < 5
 
 
+def run_status_report() -> None:
+    """11:00 - 오전 상태 보고"""
+    if not is_trading_day():
+        return
+
+    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] 상태 보고")
+    try:
+        holdings = kis_api.get_holdings()
+        hold_count = len([h for h in holdings if int(h.get("hldg_qty", 0)) > 0])
+
+        lines = [
+            f"📊 <b>오전 11시 상태 보고</b>",
+            f"모드: {os.getenv('KIS_MODE', '알 수 없음')}",
+            f"보유 종목 수: {hold_count}개",
+            f"오늘 매수 종목: {len(_bought_today)}개",
+            f"오늘 투자금: {_total_invested_today:,}원 / {MAX_TOTAL_AMOUNT:,}원",
+            f"오후 2:50 스크리닝 예정",
+        ]
+        notifier.send("\n".join(lines))
+    except Exception as e:
+        notifier.send(f"📊 오전 11시 상태 보고\n봇 정상 실행 중\n(잔고 조회 오류: {e})")
+
+
 def run_screening() -> None:
     """14:50 - 종목 스크리닝 및 AI 분석"""
     if not is_trading_day():
@@ -195,9 +218,10 @@ def main():
     print("=== KIS 자동매매 시작 (종산 종가베팅) ===")
     notifier.send("🤖 자동매매 봇 시작됨\n매일 14:50 스크리닝 → 15:00 매수 → 익일 09:01 매도")
 
+    schedule.every().day.at("09:01").do(run_sell)
+    schedule.every().day.at("11:00").do(run_status_report)
     schedule.every().day.at("14:50").do(run_screening)
     schedule.every().day.at("15:00").do(run_buy)
-    schedule.every().day.at("09:01").do(run_sell)
 
     print("스케줄 등록 완료: 14:50 스크리닝 / 15:00 매수 / 09:01 매도")
 
