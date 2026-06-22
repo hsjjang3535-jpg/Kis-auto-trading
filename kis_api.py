@@ -78,6 +78,83 @@ def get_stock_info(stock_code: str) -> dict:
     return res.json().get("output", {})
 
 
+def get_daily_chart(stock_code: str, days: int = 200) -> list[dict]:
+    """일봉 데이터 조회 (최근 days일)"""
+    today = datetime.now().strftime("%Y%m%d")
+    start = (datetime.now() - timedelta(days=days + 50)).strftime("%Y%m%d")
+    res = requests.get(
+        f"{BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice",
+        headers=_headers("FHKST03010100"),
+        params={
+            "fid_cond_mrkt_div_code": "J",
+            "fid_input_iscd": stock_code,
+            "fid_input_date_1": start,
+            "fid_input_date_2": today,
+            "fid_period_div_code": "D",
+            "fid_org_adj_prc": "0",
+        },
+    )
+    res.raise_for_status()
+    return res.json().get("output2", [])
+
+
+def get_chart_indicators(stock_code: str) -> dict:
+    """
+    차트 지표 계산:
+    - ma5: 5일 이동평균
+    - ma20: 20일 이동평균
+    - high_200: 200일 최고가
+    - vol_ratio: 오늘 거래량 / 최근 5일 평균 거래량 비율
+    - current: 현재가
+    - upper_tail_ratio: 윗꼬리 비율 (낮을수록 좋음)
+    """
+    candles = get_daily_chart(stock_code, days=210)
+    if len(candles) < 20:
+        return {}
+
+    closes = []
+    volumes = []
+    highs = []
+    for c in candles:
+        try:
+            closes.append(float(c.get("stck_clpr", 0)))
+            volumes.append(float(c.get("acml_vol", 0)))
+            highs.append(float(c.get("stck_hgpr", 0)))
+        except ValueError:
+            continue
+
+    if len(closes) < 20:
+        return {}
+
+    current = closes[0]
+    ma5 = sum(closes[:5]) / 5
+    ma20 = sum(closes[:20]) / 20
+    high_200 = max(highs[:min(200, len(highs))])
+    vol_today = volumes[0]
+    vol_avg5 = sum(volumes[1:6]) / 5 if len(volumes) >= 6 else vol_today
+
+    # 오늘 봉의 윗꼬리 비율
+    try:
+        today_high = highs[0]
+        today_candle = candles[0]
+        today_open = float(today_candle.get("stck_oprc", current))
+        body_top = max(current, today_open)
+        upper_tail = today_high - body_top
+        candle_range = today_high - float(today_candle.get("stck_lwpr", today_high))
+        upper_tail_ratio = upper_tail / candle_range if candle_range > 0 else 0
+    except (ValueError, ZeroDivisionError):
+        upper_tail_ratio = 0
+
+    return {
+        "current": current,
+        "ma5": ma5,
+        "ma20": ma20,
+        "high_200": high_200,
+        "vol_ratio": vol_today / vol_avg5 if vol_avg5 > 0 else 0,
+        "upper_tail_ratio": upper_tail_ratio,
+    }
+
+
 def is_near_high(stock_code: str, threshold_pct: float = 5.0) -> bool:
     """52주 신고가 대비 threshold_pct% 이내인지 확인"""
     info = get_stock_info(stock_code)
