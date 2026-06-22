@@ -21,6 +21,7 @@ load_dotenv()
 
 MAX_BUY_AMOUNT = int(os.getenv("MAX_BUY_AMOUNT", "500000"))
 MAX_TOTAL_AMOUNT = int(os.getenv("MAX_TOTAL_AMOUNT", "1000000"))
+SELL_BLACKLIST = [s.strip() for s in os.getenv("SELL_BLACKLIST", "").split(",") if s.strip()]
 
 # 당일 매수한 종목 기록 (봇이 직접 매수한 것만 추적)
 _bought_today: list[dict] = []
@@ -149,6 +150,12 @@ def run_sell() -> None:
         name = stock["name"]
         quantity = stock["quantity"]
         buy_price = stock["buy_price"]
+
+        # 매도 금지 종목 건너뜀
+        if name in SELL_BLACKLIST:
+            print(f"[매도 건너뜀] {name} - 매도 금지 종목")
+            notifier.send(f"🚫 {name} 매도 금지 종목으로 보유 유지")
+            continue
 
         try:
             result = kis_api.sell_stock(code, quantity)
