@@ -145,11 +145,14 @@ def get_chart_indicators(stock_code: str) -> dict:
     except (ValueError, ZeroDivisionError):
         upper_tail_ratio = 0
 
+    high_20 = max(highs[1:min(21, len(highs))])  # 전일 기준 20일 최고가 (오늘 제외)
+
     return {
         "current": current,
         "ma5": ma5,
         "ma20": ma20,
         "high_200": high_200,
+        "high_20": high_20,
         "vol_ratio": vol_today / vol_avg5 if vol_avg5 > 0 else 0,
         "upper_tail_ratio": upper_tail_ratio,
     }
