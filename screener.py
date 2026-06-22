@@ -84,6 +84,7 @@ def screen_candidates(top_n: int = 30) -> list[dict]:
         high_20 = ind.get("high_20", high_200)
         vol_ratio = ind["vol_ratio"]
         upper_tail = ind["upper_tail_ratio"]
+        rsi = ind.get("rsi", 50.0)
 
         # 52주 신고가 조회
         w52_high = 0
@@ -102,6 +103,7 @@ def screen_candidates(top_n: int = 30) -> list[dict]:
             "ma5": ma5,
             "ma20": ma20,
             "vol_ratio": vol_ratio,
+            "rsi": rsi,
         }
 
         # ── 상단매매 조건 ──
@@ -112,12 +114,13 @@ def screen_candidates(top_n: int = 30) -> list[dict]:
             upper_tail <= 0.3
         )
 
-        # ── 하단매매 조건 ──
+        # ── 하단매매 조건 (RSI 과매도 포함) ──
         lower_ok = (
             current < ma20 and
             current >= ma5 and
             w52_gap <= 20 and
-            vol_ratio >= 1.5
+            vol_ratio >= 1.5 and
+            rsi <= 30                             # RSI 과매도 구간
         )
 
         # ── 돌파매매 조건 ──
@@ -132,15 +135,15 @@ def screen_candidates(top_n: int = 30) -> list[dict]:
 
         if upper_ok:
             upper_candidates.append({**base, "strategy": "상단매매"})
-            print(f"  🔴 상단매매: {name}({code}) {rate:+.1f}% 거래량{vol_ratio:.1f}x")
+            print(f"  🔴 상단매매: {name}({code}) {rate:+.1f}% 거래량{vol_ratio:.1f}x RSI{rsi:.0f}")
         elif breakout_ok:
             breakout_candidates.append({**base, "strategy": "돌파매매"})
             print(f"  🟡 돌파매매: {name}({code}) {rate:+.1f}% 20일고가 돌파 거래량{vol_ratio:.1f}x")
         elif lower_ok:
             lower_candidates.append({**base, "strategy": "하단매매"})
-            print(f"  🔵 하단매매: {name}({code}) {rate:+.1f}% MA20 아래 눌림목")
+            print(f"  🔵 하단매매: {name}({code}) {rate:+.1f}% RSI{rsi:.0f} 과매도 눌림목")
         else:
-            print(f"  ❌ 제외: {name}({code})")
+            print(f"  ❌ 제외: {name}({code}) RSI{rsi:.0f}")
 
     # 우선순위: 상단매매 > 돌파매매 > 하단매매
     all_candidates = upper_candidates + breakout_candidates + lower_candidates

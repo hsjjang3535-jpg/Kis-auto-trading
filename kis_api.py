@@ -147,6 +147,9 @@ def get_chart_indicators(stock_code: str) -> dict:
 
     high_20 = max(highs[1:min(21, len(highs))])  # 전일 기준 20일 최고가 (오늘 제외)
 
+    # RSI(14) 계산
+    rsi = _calc_rsi(closes, period=14)
+
     return {
         "current": current,
         "ma5": ma5,
@@ -155,7 +158,27 @@ def get_chart_indicators(stock_code: str) -> dict:
         "high_20": high_20,
         "vol_ratio": vol_today / vol_avg5 if vol_avg5 > 0 else 0,
         "upper_tail_ratio": upper_tail_ratio,
+        "rsi": rsi,
     }
+
+
+def _calc_rsi(closes: list[float], period: int = 14) -> float:
+    """RSI 계산 (closes[0]이 최신)"""
+    if len(closes) < period + 1:
+        return 50.0
+    # 최신→과거 순서이므로 역순으로 변환
+    prices = list(reversed(closes[:period + 1]))
+    gains, losses = [], []
+    for i in range(1, len(prices)):
+        diff = prices[i] - prices[i - 1]
+        gains.append(max(diff, 0))
+        losses.append(max(-diff, 0))
+    avg_gain = sum(gains) / period
+    avg_loss = sum(losses) / period
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return round(100 - (100 / (1 + rs)), 2)
 
 
 def is_near_high(stock_code: str, threshold_pct: float = 5.0) -> bool:

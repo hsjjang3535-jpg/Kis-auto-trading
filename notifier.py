@@ -31,12 +31,13 @@ def notify_buy(name: str, code: str, quantity: int, price: int, reason: str) -> 
     )
 
 
-def notify_sell(name: str, code: str, quantity: int, profit_pct: float) -> None:
+def notify_sell(name: str, code: str, quantity: int, profit_pct: float, reason: str = "") -> None:
     emoji = "📈" if profit_pct >= 0 else "📉"
     send(
         f"{emoji} <b>매도 체결</b>\n"
         f"종목: {name} ({code})\n"
-        f"수량: {quantity}주 / 수익률: {profit_pct:+.2f}%"
+        f"수량: {quantity}주 / 수익률: {profit_pct:+.2f}%\n"
+        f"사유: {reason}"
     )
 
 

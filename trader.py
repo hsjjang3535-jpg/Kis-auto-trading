@@ -22,6 +22,8 @@ load_dotenv()
 MAX_BUY_AMOUNT = int(os.getenv("MAX_BUY_AMOUNT", "500000"))
 MAX_TOTAL_AMOUNT = int(os.getenv("MAX_TOTAL_AMOUNT", "1000000"))
 SELL_BLACKLIST = [s.strip() for s in os.getenv("SELL_BLACKLIST", "").split(",") if s.strip()]
+STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "2.0"))    # 손절 기준 (%)
+TAKE_PROFIT_PCT = float(os.getenv("TAKE_PROFIT_PCT", "3.0")) # 익절 기준 (%)
 
 # 당일 매수한 종목 기록 (봇이 직접 매수한 것만 추적)
 _bought_today: list[dict] = []
@@ -158,14 +160,23 @@ def run_sell() -> None:
             continue
 
         try:
+            # 현재가 확인 후 익절/손절 판단
+            price_info = kis_api.get_stock_info(code)
+            current_price = float(price_info.get("stck_prpr", buy_price))
+            profit_pct = (current_price - buy_price) / buy_price * 100 if buy_price else 0
+
+            if profit_pct >= TAKE_PROFIT_PCT:
+                reason = f"익절 (+{profit_pct:.1f}% >= +{TAKE_PROFIT_PCT}%)"
+            elif profit_pct <= -STOP_LOSS_PCT:
+                reason = f"손절 ({profit_pct:.1f}% <= -{STOP_LOSS_PCT}%)"
+            else:
+                reason = f"예정 매도 ({profit_pct:+.1f}%)"
+
             result = kis_api.sell_stock(code, quantity)
             rt_cd = result.get("rt_cd", "")
 
             if rt_cd == "0":
-                price_info = kis_api.get_stock_info(code)
-                current = float(price_info.get("stck_prpr", buy_price))
-                profit_pct = (current - buy_price) / buy_price * 100 if buy_price else 0
-                notifier.notify_sell(name, code, quantity, profit_pct)
+                notifier.notify_sell(name, code, quantity, profit_pct, reason)
             else:
                 msg = result.get("msg1", "알 수 없는 오류")
                 notifier.notify_error(f"{name} 매도 실패: {msg}")
