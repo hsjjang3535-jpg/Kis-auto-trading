@@ -427,12 +427,6 @@ def main():
         "익절 +3% / 손절 -2% / 14:50 강제청산"
     )
 
-    # 장중에 재시작된 경우 즉시 스크리닝 실행
-    t = _market_minutes()
-    if is_trading_day() and 8 * 60 + 50 <= t <= 14 * 60 + 30 and not _watchlist:
-        print("[재시작 감지] 장중 재시작 - 즉시 스크리닝 실행")
-        run_morning_screening()
-
     # 한국시간(KST) 기준 스케줄
     schedule.every().day.at("08:50").do(run_morning_screening)  # 장 시작 10분 전 (전날 데이터 기준)
     schedule.every(5).minutes.do(run_market_check)

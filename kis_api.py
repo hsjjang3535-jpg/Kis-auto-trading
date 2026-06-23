@@ -15,46 +15,72 @@ MARKET_URL = "https://openapi.koreainvestment.com:9443"
 # 주문/계좌 조회는 모드에 따라 구분
 TRADE_URL = "https://openapi.koreainvestment.com:9443" if MODE == "실전" else "https://openapivts.koreainvestment.com:29443"
 
-_token_cache = {"token": None, "expires_at": None}
+# 서버별 토큰 캐시 분리 (실전 서버 토큰 / VTS 서버 토큰)
+_token_cache = {
+    "market": {"token": None, "expires_at": None},  # 시세 조회용 (항상 실전 서버)
+    "trade":  {"token": None, "expires_at": None},  # 주문/계좌용 (모드에 따라)
+}
 
 
-def get_access_token() -> str:
-    now = datetime.now()
-    if _token_cache["token"] and _token_cache["expires_at"] > now:
-        return _token_cache["token"]
-
+def _fetch_token(server_url: str) -> str:
     res = requests.post(
-        f"{TRADE_URL}/oauth2/tokenP",
+        f"{server_url}/oauth2/tokenP",
         json={"grant_type": "client_credentials", "appkey": APP_KEY, "appsecret": APP_SECRET},
         timeout=10,
     )
     res.raise_for_status()
-    data = res.json()
-    _token_cache["token"] = data["access_token"]
-    _token_cache["expires_at"] = now + timedelta(hours=23)
-    return _token_cache["token"]
+    return res.json()["access_token"]
 
 
-def _headers(tr_id: str) -> dict:
+def _get_market_token() -> str:
+    """시세/차트 조회용 토큰 (항상 실전 서버)"""
+    cache = _token_cache["market"]
+    now = datetime.now()
+    if cache["token"] and cache["expires_at"] > now:
+        return cache["token"]
+    cache["token"] = _fetch_token(MARKET_URL)
+    cache["expires_at"] = now + timedelta(hours=23)
+    return cache["token"]
+
+
+def _get_trade_token() -> str:
+    """주문/계좌 조회용 토큰 (모드에 따라 실전 또는 VTS)"""
+    cache = _token_cache["trade"]
+    now = datetime.now()
+    if cache["token"] and cache["expires_at"] > now:
+        return cache["token"]
+    cache["token"] = _fetch_token(TRADE_URL)
+    cache["expires_at"] = now + timedelta(hours=23)
+    return cache["token"]
+
+
+def _market_headers(tr_id: str) -> dict:
+    """시세/차트 조회용 헤더 (실전 서버 토큰)"""
     return {
         "Content-Type": "application/json",
-        "authorization": f"Bearer {get_access_token()}",
+        "authorization": f"Bearer {_get_market_token()}",
         "appkey": APP_KEY,
         "appsecret": APP_SECRET,
         "tr_id": tr_id,
     }
 
 
-def _market_headers(tr_id: str) -> dict:
-    """시장 데이터 조회용 헤더 (항상 실전 서버 토큰)"""
-    return _headers(tr_id)
+def _trade_headers(tr_id: str) -> dict:
+    """주문/계좌 조회용 헤더 (모드별 토큰)"""
+    return {
+        "Content-Type": "application/json",
+        "authorization": f"Bearer {_get_trade_token()}",
+        "appkey": APP_KEY,
+        "appsecret": APP_SECRET,
+        "tr_id": tr_id,
+    }
 
 
 def get_top_trading_value(top_n: int = 20) -> list[dict]:
     """거래대금 상위 종목 조회"""
     res = requests.get(
         f"{MARKET_URL}/uapi/domestic-stock/v1/ranking/trading-value",
-        headers=_headers("FHPST01700000"),
+        headers=_market_headers("FHPST01700000"),
         timeout=10,
         params={
             "fid_cond_mrkt_div_code": "J",
@@ -81,7 +107,7 @@ def get_stock_info(stock_code: str) -> dict:
     """주식 현재가 및 기본 정보 조회"""
     res = requests.get(
         f"{MARKET_URL}/uapi/domestic-stock/v1/quotations/inquire-price",
-        headers=_headers("FHKST01010100"),
+        headers=_market_headers("FHKST01010100"),
         params={"fid_cond_mrkt_div_code": "J", "fid_input_iscd": stock_code},
         timeout=10,
     )
@@ -95,7 +121,7 @@ def get_daily_chart(stock_code: str, days: int = 200) -> list[dict]:
     start = (datetime.now() - timedelta(days=days + 50)).strftime("%Y%m%d")
     res = requests.get(
         f"{MARKET_URL}/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice",
-        headers=_headers("FHKST03010100"),
+        headers=_market_headers("FHKST03010100"),
         timeout=15,
         params={
             "fid_cond_mrkt_div_code": "J",
@@ -215,7 +241,7 @@ def buy_stock(stock_code: str, quantity: int) -> dict:
 
     res = requests.post(
         f"{TRADE_URL}/uapi/domestic-stock/v1/trading/order-cash",
-        headers=_headers(tr_id),
+        headers=_trade_headers(tr_id),
         json={
             "CANO": acc_no,
             "ACNT_PRDT_CD": acc_prod,
@@ -238,7 +264,7 @@ def sell_stock(stock_code: str, quantity: int) -> dict:
 
     res = requests.post(
         f"{TRADE_URL}/uapi/domestic-stock/v1/trading/order-cash",
-        headers=_headers(tr_id),
+        headers=_trade_headers(tr_id),
         json={
             "CANO": acc_no,
             "ACNT_PRDT_CD": acc_prod,
@@ -261,7 +287,7 @@ def get_holdings() -> list[dict]:
 
     res = requests.get(
         f"{TRADE_URL}/uapi/domestic-stock/v1/trading/inquire-balance",
-        headers=_headers(tr_id),
+        headers=_trade_headers(tr_id),
         timeout=10,
         params={
             "CANO": acc_no,
