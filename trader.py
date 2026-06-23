@@ -142,7 +142,7 @@ def run_screening() -> None:
     notifier.send("⏰ 오후 2시 50분 - 종가베팅 후보 분석 시작")
 
     try:
-        candidates = screener.screen_candidates(top_n=20, high_threshold_pct=5.0)
+        candidates = screener.screen_candidates(top_n=20)
 
         approved = []
         for c in candidates:
