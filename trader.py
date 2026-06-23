@@ -2,10 +2,11 @@
 자동매매 메인 로직 (장중매매)
 
 스케줄 (한국시간 KST, TZ=Asia/Seoul):
-  09:00 - 워치리스트 스크리닝 (전날 차트 기준)
+  08:50 - 워치리스트 스크리닝 (전날 차트 기준)
   09:10 ~ 14:45 - 5분마다 진입/청산 조건 체크
   11:00 - 상태 보고
   14:50 - 잔여 포지션 강제 청산
+  15:10 - 장마감 손익 보고
 """
 import os
 import json
@@ -46,6 +47,10 @@ _positions: dict[str, dict] = {}
 
 # 오늘 총 투자금
 _total_invested_today: int = 0
+
+# 오늘 체결된 매도 기록 (손익 보고용)
+# { name, code, quantity, buy_price, sell_price, profit_pct, profit_won, reason }
+_trades_today: list[dict] = []
 
 
 # ── 상태 저장/복원 ─────────────────────────────────────────────────────────────
@@ -118,7 +123,7 @@ def run_morning_screening() -> None:
 
     global _watchlist
     print(f"\n[{datetime.now().strftime('%H:%M:%S')}] 오전 스크리닝 시작")
-    notifier.send("⏰ 오전 9시 - 장중매매 워치리스트 구성 시작")
+    notifier.send("⏰ 오전 8시 50분 - 장 시작 전 워치리스트 구성 시작")
 
     try:
         candidates = screener.screen_candidates(top_n=30)
@@ -203,6 +208,42 @@ def run_status_report() -> None:
         notifier.send(f"📊 오전 11시 상태 보고\n봇 정상 실행 중\n(오류: {e})")
 
 
+def run_closing_report() -> None:
+    """15:10 - 장마감 손익 보고"""
+    if not is_trading_day():
+        return
+
+    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] 장마감 손익 보고")
+
+    if not _trades_today:
+        notifier.send("📋 <b>오늘 장마감 보고</b>\n매매 없음 (체결 종목 없음)")
+        return
+
+    total_profit_won = sum(t["profit_won"] for t in _trades_today)
+    win_trades = [t for t in _trades_today if t["profit_won"] > 0]
+    lose_trades = [t for t in _trades_today if t["profit_won"] <= 0]
+
+    lines = ["📋 <b>오늘 장마감 손익 보고</b>\n"]
+
+    for t in _trades_today:
+        emoji = "📈" if t["profit_won"] > 0 else "📉"
+        sign = "+" if t["profit_won"] > 0 else ""
+        lines.append(
+            f"{emoji} {t['name']}({t['code']})\n"
+            f"   매수 {t['buy_price']:,}원 → 매도 {t['sell_price']:,}원\n"
+            f"   {t['quantity']}주 | {sign}{t['profit_pct']}% | {sign}{t['profit_won']:,}원\n"
+            f"   사유: {t['reason']}"
+        )
+
+    lines.append("")
+    lines.append(f"─────────────────")
+    lines.append(f"총 매매: {len(_trades_today)}건 (익절 {len(win_trades)}건 / 손절 {len(lose_trades)}건)")
+    sign = "+" if total_profit_won > 0 else ""
+    lines.append(f"오늘 손익: <b>{sign}{total_profit_won:,}원</b>")
+
+    notifier.send("\n".join(lines))
+
+
 def run_force_close() -> None:
     """14:50 - 잔여 포지션 강제 청산"""
     if not is_trading_day():
@@ -267,7 +308,7 @@ def _check_entry() -> None:
                 entry_ok = (
                     current >= ma5 and
                     ma20 > 0 and current < ma20 and
-                    rsi <= 35
+                    rsi <= 30  # screener와 동일 기준
                 )
             elif strategy == "돌파매매":
                 entry_ok = (
@@ -329,9 +370,9 @@ def _check_exit() -> None:
             profit_pct = (current - pos["buy_price"]) / pos["buy_price"] * 100
 
             if profit_pct >= TAKE_PROFIT_PCT:
-                _execute_sell(code, pos, f"익절 (+{profit_pct:.1f}%)")
+                _execute_sell(code, pos, f"익절 (+{profit_pct:.1f}%)", current, profit_pct)
             elif profit_pct <= -STOP_LOSS_PCT:
-                _execute_sell(code, pos, f"손절 ({profit_pct:.1f}%)")
+                _execute_sell(code, pos, f"손절 ({profit_pct:.1f}%)", current, profit_pct)
 
             time.sleep(0.3)
 
@@ -339,17 +380,31 @@ def _check_exit() -> None:
             print(f"[청산 체크 오류] {pos['name']}: {e}")
 
 
-def _execute_sell(code: str, pos: dict, reason: str) -> None:
+def _execute_sell(code: str, pos: dict, reason: str,
+                  current: float = 0, profit_pct: float = 0) -> None:
     name = pos["name"]
     quantity = pos["quantity"]
 
     try:
-        info = kis_api.get_stock_info(code)
-        current = float(info.get("stck_prpr", pos["buy_price"]))
-        profit_pct = (current - pos["buy_price"]) / pos["buy_price"] * 100
+        # 현재가가 전달되지 않은 경우 (강제청산 등)에만 재조회
+        if current == 0:
+            info = kis_api.get_stock_info(code)
+            current = float(info.get("stck_prpr", pos["buy_price"]))
+            profit_pct = (current - pos["buy_price"]) / pos["buy_price"] * 100
 
         result = kis_api.sell_stock(code, quantity)
         if result.get("rt_cd") == "0":
+            profit_won = int((current - pos["buy_price"]) * quantity)
+            _trades_today.append({
+                "name": name,
+                "code": code,
+                "quantity": quantity,
+                "buy_price": pos["buy_price"],
+                "sell_price": int(current),
+                "profit_pct": round(profit_pct, 2),
+                "profit_won": profit_won,
+                "reason": reason,
+            })
             del _positions[code]
             _save_state()
             notifier.notify_sell(name, code, quantity, profit_pct, reason)
@@ -374,22 +429,24 @@ def main():
 
     # 장중에 재시작된 경우 즉시 스크리닝 실행
     t = _market_minutes()
-    if is_trading_day() and 9 * 60 <= t <= 14 * 60 + 30 and not _watchlist:
+    if is_trading_day() and 8 * 60 + 50 <= t <= 14 * 60 + 30 and not _watchlist:
         print("[재시작 감지] 장중 재시작 - 즉시 스크리닝 실행")
         run_morning_screening()
 
     # 한국시간(KST) 기준 스케줄
-    schedule.every().day.at("09:00").do(run_morning_screening)
+    schedule.every().day.at("08:50").do(run_morning_screening)  # 장 시작 10분 전 (전날 데이터 기준)
     schedule.every(5).minutes.do(run_market_check)
     schedule.every().day.at("11:00").do(run_status_report)
     schedule.every().day.at("14:50").do(run_force_close)
+    schedule.every().day.at("15:10").do(run_closing_report)
 
     print("스케줄 등록 완료 (한국시간 KST):")
-    print("  09:00       - 워치리스트 스크리닝")
+    print("  08:50       - 워치리스트 스크리닝 (장 시작 전)")
     print("  09:10~14:30 - 5분마다 진입 체크")
     print("  09:10~14:45 - 5분마다 청산 체크 (익절/손절)")
     print("  11:00       - 상태 보고")
     print("  14:50       - 강제 청산")
+    print("  15:10       - 장마감 손익 보고")
 
     while True:
         schedule.run_pending()
