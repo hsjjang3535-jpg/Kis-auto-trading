@@ -7,6 +7,12 @@ load_dotenv()
 
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
+_MODELS = [
+    "llama-3.3-70b-versatile",
+    "llama-3.1-8b-instant",
+    "gemma2-9b-it",
+]
+
 
 def fetch_news(stock_name: str) -> str:
     """네이버 금융 뉴스 검색"""
@@ -55,18 +61,25 @@ def analyze(stock_name: str, code: str, change_rate: float) -> dict:
 {{"buy": true/false, "strength": "강/중/약/없음", "reason": "한 줄 요약"}}
 """
 
-    try:
-        response = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.2,
-        )
-        text = response.choices[0].message.content.strip()
-        import json, re
-        match = re.search(r'\{.*\}', text, re.DOTALL)
-        if match:
-            return json.loads(match.group())
-    except Exception as e:
-        print(f"[AI 분석 오류] {e}")
+    import json, re
+    for model in _MODELS:
+        try:
+            response = groq_client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.2,
+            )
+            text = response.choices[0].message.content.strip()
+            match = re.search(r'\{.*\}', text, re.DOTALL)
+            if match:
+                return json.loads(match.group())
+            break
+        except Exception as e:
+            err_str = str(e).lower()
+            if "503" in err_str or "overcapacity" in err_str or "overloaded" in err_str:
+                print(f"[AI] {model} 과부하, 다음 모델 시도...")
+                continue
+            print(f"[AI 분석 오류] {e}")
+            break
 
     return {"buy": False, "strength": "없음", "reason": "분석 실패"}
