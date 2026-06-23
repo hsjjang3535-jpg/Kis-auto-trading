@@ -131,6 +131,7 @@ def run_morning_screening() -> None:
             c["reason"] = result["reason"]
             if result["buy"]:
                 approved.append(c)
+            time.sleep(2)  # Groq API 속도 제한 방지 (분당 30회)
 
         _watchlist = approved
 
@@ -370,6 +371,12 @@ def main():
         "09:00 워치리스트 → 09:10~14:30 5분마다 진입\n"
         "익절 +3% / 손절 -2% / 14:50 강제청산"
     )
+
+    # 장중에 재시작된 경우 즉시 스크리닝 실행
+    t = _market_minutes()
+    if is_trading_day() and 9 * 60 <= t <= 14 * 60 + 30 and not _watchlist:
+        print("[재시작 감지] 장중 재시작 - 즉시 스크리닝 실행")
+        run_morning_screening()
 
     # 한국시간(KST) 기준 스케줄
     schedule.every().day.at("09:00").do(run_morning_screening)
