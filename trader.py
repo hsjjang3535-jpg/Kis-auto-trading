@@ -7,9 +7,10 @@
   09:01 - 다음날 시초가 매도
 """
 import os
+import json
 import time
 import schedule
-from datetime import datetime
+from datetime import date, datetime
 from dotenv import load_dotenv
 
 import kis_api
@@ -22,17 +23,91 @@ load_dotenv()
 MAX_BUY_AMOUNT = int(os.getenv("MAX_BUY_AMOUNT", "500000"))
 MAX_TOTAL_AMOUNT = int(os.getenv("MAX_TOTAL_AMOUNT", "1000000"))
 SELL_BLACKLIST = [s.strip() for s in os.getenv("SELL_BLACKLIST", "").split(",") if s.strip()]
-STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "2.0"))    # 손절 기준 (%)
-TAKE_PROFIT_PCT = float(os.getenv("TAKE_PROFIT_PCT", "3.0")) # 익절 기준 (%)
+STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "2.0"))
+TAKE_PROFIT_PCT = float(os.getenv("TAKE_PROFIT_PCT", "3.0"))
 
 # 당일 매수한 종목 기록 (봇이 직접 매수한 것만 추적)
 _bought_today: list[dict] = []
 _total_invested_today: int = 0
 
+# 매수 기록 저장 파일 (재시작 후에도 유지)
+_STATE_FILE = "bought_today.json"
+
+# 한국 증시 공휴일 (KRX 휴장일)
+_KR_HOLIDAYS = {
+    # 2026년
+    "2026-01-01",  # 신정
+    "2026-02-16",  # 설날 연휴
+    "2026-02-17",  # 설날
+    "2026-02-18",  # 설날 연휴
+    "2026-03-01",  # 삼일절
+    "2026-05-05",  # 어린이날
+    "2026-05-25",  # 부처님오신날
+    "2026-06-06",  # 현충일
+    "2026-08-15",  # 광복절
+    "2026-09-24",  # 추석 연휴
+    "2026-09-25",  # 추석
+    "2026-09-26",  # 추석 연휴
+    "2026-10-03",  # 개천절
+    "2026-10-09",  # 한글날
+    "2026-12-25",  # 성탄절
+    "2026-12-31",  # 연말 휴장
+    # 2027년
+    "2027-01-01",  # 신정
+    "2027-03-01",  # 삼일절
+    "2027-05-05",  # 어린이날
+    "2027-06-06",  # 현충일
+    "2027-08-15",  # 광복절
+    "2027-10-03",  # 개천절
+    "2027-10-09",  # 한글날
+    "2027-12-25",  # 성탄절
+    "2027-12-31",  # 연말 휴장
+}
+
+
+def _save_state() -> None:
+    """매수 기록을 파일에 저장 (봇 재시작 후에도 유지)"""
+    today_str = date.today().isoformat()
+    state = {
+        "date": today_str,
+        "bought_today": _bought_today,
+        "total_invested_today": _total_invested_today,
+    }
+    try:
+        with open(_STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[상태 저장 오류] {e}")
+
+
+def _load_state() -> None:
+    """봇 시작 시 오늘 날짜 기록 불러오기"""
+    global _bought_today, _total_invested_today
+    if not os.path.exists(_STATE_FILE):
+        return
+    try:
+        with open(_STATE_FILE, "r", encoding="utf-8") as f:
+            state = json.load(f)
+        # 오늘 날짜 기록만 복원 (어제 기록이면 무시)
+        if state.get("date") == date.today().isoformat():
+            _bought_today = state.get("bought_today", [])
+            _total_invested_today = state.get("total_invested_today", 0)
+            if _bought_today:
+                print(f"[상태 복원] 오늘 매수 기록 {len(_bought_today)}건 불러옴")
+    except Exception as e:
+        print(f"[상태 불러오기 오류] {e}")
+
 
 def is_trading_day() -> bool:
-    """주말이면 매매 건너뜀"""
-    return datetime.now().weekday() < 5
+    """주말 또는 한국 공휴일이면 False"""
+    today = datetime.now()
+    if today.weekday() >= 5:
+        return False
+    today_str = today.strftime("%Y-%m-%d")
+    if today_str in _KR_HOLIDAYS:
+        print(f"[공휴일] {today_str} - 매매 건너뜀")
+        return False
+    return True
 
 
 def run_status_report() -> None:
@@ -146,6 +221,7 @@ def run_buy() -> None:
                     "quantity": quantity,
                     "buy_price": current_price,
                 })
+                _save_state()
                 notifier.notify_buy(stock["name"], stock["code"], quantity, current_price, stock["reason"])
             else:
                 msg = result.get("msg1", "알 수 없는 오류")
@@ -209,13 +285,15 @@ def run_sell() -> None:
 
         time.sleep(0.5)
 
-    # 당일 매수 기록 초기화
+    # 당일 매수 기록 초기화 및 파일 삭제
     _bought_today.clear()
     _total_invested_today = 0
+    _save_state()
 
 
 def main():
     print("=== KIS 자동매매 시작 (종산 종가베팅) ===")
+    _load_state()
     notifier.send("🤖 자동매매 봇 시작됨\n매일 14:50 스크리닝 → 15:00 매수 → 익일 09:01 매도")
 
     # Railway 서버는 UTC 기준 → 한국시간(KST) = UTC+9이므로 9시간 차감
