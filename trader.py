@@ -296,13 +296,14 @@ def main():
     _load_state()
     notifier.send("🤖 자동매매 봇 시작됨\n매일 14:50 스크리닝 → 15:00 매수 → 익일 09:01 매도")
 
-    # Railway 서버는 UTC 기준 → 한국시간(KST) = UTC+9이므로 9시간 차감
-    schedule.every().day.at("00:01").do(run_sell)       # KST 09:01
-    schedule.every().day.at("02:00").do(run_status_report)  # KST 11:00
-    schedule.every().day.at("05:50").do(run_screening)  # KST 14:50
-    schedule.every().day.at("06:00").do(run_buy)        # KST 15:00
+    # TZ=Asia/Seoul 환경변수로 Railway 서버를 한국시간(KST)으로 고정
+    # → 아래 시간은 모두 한국시간(KST) 기준
+    schedule.every().day.at("09:01").do(run_sell)
+    schedule.every().day.at("11:00").do(run_status_report)
+    schedule.every().day.at("14:50").do(run_screening)
+    schedule.every().day.at("15:00").do(run_buy)
 
-    print("스케줄 등록 완료 (KST): 09:01 매도 / 11:00 상태보고 / 14:50 스크리닝 / 15:00 매수")
+    print("스케줄 등록 완료 (한국시간 KST): 09:01 매도 / 11:00 상태보고 / 14:50 스크리닝 / 15:00 매수")
 
     while True:
         schedule.run_pending()
