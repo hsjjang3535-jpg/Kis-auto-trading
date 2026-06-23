@@ -10,7 +10,10 @@ APP_SECRET = os.getenv("KIS_APP_SECRET")
 MODE = os.getenv("KIS_MODE", "실전")
 ACCOUNT_NO = os.getenv("KIS_ACCOUNT_NO", "")
 
-BASE_URL = "https://openapi.koreainvestment.com:9443" if MODE == "실전" else "https://openapivts.koreainvestment.com:29443"
+# 시장 데이터(시세/차트)는 항상 실전 서버 사용 (VTS 서버는 시세 API 미지원)
+MARKET_URL = "https://openapi.koreainvestment.com:9443"
+# 주문/계좌 조회는 모드에 따라 구분
+TRADE_URL = "https://openapi.koreainvestment.com:9443" if MODE == "실전" else "https://openapivts.koreainvestment.com:29443"
 
 _token_cache = {"token": None, "expires_at": None}
 
@@ -21,8 +24,9 @@ def get_access_token() -> str:
         return _token_cache["token"]
 
     res = requests.post(
-        f"{BASE_URL}/oauth2/tokenP",
+        f"{TRADE_URL}/oauth2/tokenP",
         json={"grant_type": "client_credentials", "appkey": APP_KEY, "appsecret": APP_SECRET},
+        timeout=10,
     )
     res.raise_for_status()
     data = res.json()
@@ -41,11 +45,17 @@ def _headers(tr_id: str) -> dict:
     }
 
 
+def _market_headers(tr_id: str) -> dict:
+    """시장 데이터 조회용 헤더 (항상 실전 서버 토큰)"""
+    return _headers(tr_id)
+
+
 def get_top_trading_value(top_n: int = 20) -> list[dict]:
     """거래대금 상위 종목 조회"""
     res = requests.get(
-        f"{BASE_URL}/uapi/domestic-stock/v1/ranking/trading-value",
+        f"{MARKET_URL}/uapi/domestic-stock/v1/ranking/trading-value",
         headers=_headers("FHPST01700000"),
+        timeout=10,
         params={
             "fid_cond_mrkt_div_code": "J",
             "fid_cond_scr_div_code": "20171",
@@ -70,9 +80,10 @@ def get_top_trading_value(top_n: int = 20) -> list[dict]:
 def get_stock_info(stock_code: str) -> dict:
     """주식 현재가 및 기본 정보 조회"""
     res = requests.get(
-        f"{BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-price",
+        f"{MARKET_URL}/uapi/domestic-stock/v1/quotations/inquire-price",
         headers=_headers("FHKST01010100"),
         params={"fid_cond_mrkt_div_code": "J", "fid_input_iscd": stock_code},
+        timeout=10,
     )
     res.raise_for_status()
     return res.json().get("output", {})
@@ -83,8 +94,9 @@ def get_daily_chart(stock_code: str, days: int = 200) -> list[dict]:
     today = datetime.now().strftime("%Y%m%d")
     start = (datetime.now() - timedelta(days=days + 50)).strftime("%Y%m%d")
     res = requests.get(
-        f"{BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice",
+        f"{MARKET_URL}/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice",
         headers=_headers("FHKST03010100"),
+        timeout=15,
         params={
             "fid_cond_mrkt_div_code": "J",
             "fid_input_iscd": stock_code,
@@ -202,7 +214,7 @@ def buy_stock(stock_code: str, quantity: int) -> dict:
     tr_id = "TTTC0802U" if MODE == "실전" else "VTTC0802U"
 
     res = requests.post(
-        f"{BASE_URL}/uapi/domestic-stock/v1/trading/order-cash",
+        f"{TRADE_URL}/uapi/domestic-stock/v1/trading/order-cash",
         headers=_headers(tr_id),
         json={
             "CANO": acc_no,
@@ -212,6 +224,7 @@ def buy_stock(stock_code: str, quantity: int) -> dict:
             "ORD_QTY": str(quantity),
             "ORD_UNPR": "0",
         },
+        timeout=10,
     )
     res.raise_for_status()
     return res.json()
@@ -224,7 +237,7 @@ def sell_stock(stock_code: str, quantity: int) -> dict:
     tr_id = "TTTC0801U" if MODE == "실전" else "VTTC0801U"
 
     res = requests.post(
-        f"{BASE_URL}/uapi/domestic-stock/v1/trading/order-cash",
+        f"{TRADE_URL}/uapi/domestic-stock/v1/trading/order-cash",
         headers=_headers(tr_id),
         json={
             "CANO": acc_no,
@@ -234,6 +247,7 @@ def sell_stock(stock_code: str, quantity: int) -> dict:
             "ORD_QTY": str(quantity),
             "ORD_UNPR": "0",
         },
+        timeout=10,
     )
     res.raise_for_status()
     return res.json()
@@ -246,8 +260,9 @@ def get_holdings() -> list[dict]:
     tr_id = "TTTC8434R" if MODE == "실전" else "VTTC8434R"
 
     res = requests.get(
-        f"{BASE_URL}/uapi/domestic-stock/v1/trading/inquire-balance",
+        f"{TRADE_URL}/uapi/domestic-stock/v1/trading/inquire-balance",
         headers=_headers(tr_id),
+        timeout=10,
         params={
             "CANO": acc_no,
             "ACNT_PRDT_CD": acc_prod,
