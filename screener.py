@@ -100,9 +100,13 @@ def screen_candidates(top_n: int = 30) -> list[dict]:
             "name": name,
             "trading_value": trading_value,
             "change_rate": rate,
+            "current": current,
             "ma5": ma5,
             "ma20": ma20,
+            "high_200": high_200,
+            "high_20": high_20,
             "vol_ratio": vol_ratio,
+            "upper_tail": upper_tail,
             "rsi": rsi,
         }
 

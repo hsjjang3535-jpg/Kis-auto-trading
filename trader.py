@@ -1,10 +1,11 @@
 """
-자동매매 메인 로직
+자동매매 메인 로직 (장중매매)
 
-스케줄:
-  14:50 - 종목 스크리닝 + AI 분석
-  15:00 - 매수 실행 (AI 승인 종목)
-  09:01 - 다음날 시초가 매도
+스케줄 (한국시간 KST, TZ=Asia/Seoul):
+  09:00 - 워치리스트 스크리닝 (전날 차트 기준)
+  09:10 ~ 14:45 - 5분마다 진입/청산 조건 체크
+  11:00 - 상태 보고
+  14:50 - 잔여 포지션 강제 청산
 """
 import os
 import json
@@ -26,51 +27,33 @@ SELL_BLACKLIST = [s.strip() for s in os.getenv("SELL_BLACKLIST", "").split(",") 
 STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "2.0"))
 TAKE_PROFIT_PCT = float(os.getenv("TAKE_PROFIT_PCT", "3.0"))
 
-# 당일 매수한 종목 기록 (봇이 직접 매수한 것만 추적)
-_bought_today: list[dict] = []
-_total_invested_today: int = 0
+_STATE_FILE = "trading_state.json"
 
-# 매수 기록 저장 파일 (재시작 후에도 유지)
-_STATE_FILE = "bought_today.json"
-
-# 한국 증시 공휴일 (KRX 휴장일)
 _KR_HOLIDAYS = {
-    # 2026년
-    "2026-01-01",  # 신정
-    "2026-02-16",  # 설날 연휴
-    "2026-02-17",  # 설날
-    "2026-02-18",  # 설날 연휴
-    "2026-03-01",  # 삼일절
-    "2026-05-05",  # 어린이날
-    "2026-05-25",  # 부처님오신날
-    "2026-06-06",  # 현충일
-    "2026-08-15",  # 광복절
-    "2026-09-24",  # 추석 연휴
-    "2026-09-25",  # 추석
-    "2026-09-26",  # 추석 연휴
-    "2026-10-03",  # 개천절
-    "2026-10-09",  # 한글날
-    "2026-12-25",  # 성탄절
-    "2026-12-31",  # 연말 휴장
-    # 2027년
-    "2027-01-01",  # 신정
-    "2027-03-01",  # 삼일절
-    "2027-05-05",  # 어린이날
-    "2027-06-06",  # 현충일
-    "2027-08-15",  # 광복절
-    "2027-10-03",  # 개천절
-    "2027-10-09",  # 한글날
-    "2027-12-25",  # 성탄절
-    "2027-12-31",  # 연말 휴장
+    "2026-01-01", "2026-02-16", "2026-02-17", "2026-02-18",
+    "2026-03-01", "2026-05-05", "2026-05-25", "2026-06-06",
+    "2026-08-15", "2026-09-24", "2026-09-25", "2026-09-26",
+    "2026-10-03", "2026-10-09", "2026-12-25", "2026-12-31",
+    "2027-01-01", "2027-03-01", "2027-05-05", "2027-06-06",
+    "2027-08-15", "2027-10-03", "2027-10-09", "2027-12-25", "2027-12-31",
 }
 
+# 오전 스크리닝으로 구성된 워치리스트
+_watchlist: list[dict] = []
+
+# 현재 보유 포지션 { 종목코드: {name, quantity, buy_price, strategy} }
+_positions: dict[str, dict] = {}
+
+# 오늘 총 투자금
+_total_invested_today: int = 0
+
+
+# ── 상태 저장/복원 ─────────────────────────────────────────────────────────────
 
 def _save_state() -> None:
-    """매수 기록을 파일에 저장 (봇 재시작 후에도 유지)"""
-    today_str = date.today().isoformat()
     state = {
-        "date": today_str,
-        "bought_today": _bought_today,
+        "date": date.today().isoformat(),
+        "positions": _positions,
         "total_invested_today": _total_invested_today,
     }
     try:
@@ -81,68 +64,64 @@ def _save_state() -> None:
 
 
 def _load_state() -> None:
-    """봇 시작 시 오늘 날짜 기록 불러오기"""
-    global _bought_today, _total_invested_today
+    global _positions, _total_invested_today
     if not os.path.exists(_STATE_FILE):
         return
     try:
         with open(_STATE_FILE, "r", encoding="utf-8") as f:
             state = json.load(f)
-        # 오늘 날짜 기록만 복원 (어제 기록이면 무시)
         if state.get("date") == date.today().isoformat():
-            _bought_today = state.get("bought_today", [])
+            _positions = state.get("positions", {})
             _total_invested_today = state.get("total_invested_today", 0)
-            if _bought_today:
-                print(f"[상태 복원] 오늘 매수 기록 {len(_bought_today)}건 불러옴")
+            if _positions:
+                print(f"[상태 복원] 보유 포지션 {len(_positions)}개 불러옴")
     except Exception as e:
         print(f"[상태 불러오기 오류] {e}")
 
 
+# ── 유틸 ──────────────────────────────────────────────────────────────────────
+
 def is_trading_day() -> bool:
-    """주말 또는 한국 공휴일이면 False"""
     today = datetime.now()
     if today.weekday() >= 5:
         return False
-    today_str = today.strftime("%Y-%m-%d")
-    if today_str in _KR_HOLIDAYS:
-        print(f"[공휴일] {today_str} - 매매 건너뜀")
+    if today.strftime("%Y-%m-%d") in _KR_HOLIDAYS:
+        print(f"[공휴일] {today.strftime('%Y-%m-%d')} - 매매 건너뜀")
         return False
     return True
 
 
-def run_status_report() -> None:
-    """11:00 - 오전 상태 보고"""
+def _market_minutes() -> int:
+    """현재 시각을 분 단위로 반환 (예: 09:35 → 575)"""
+    now = datetime.now()
+    return now.hour * 60 + now.minute
+
+
+def is_entry_time() -> bool:
+    """진입 가능 시간: 09:10 ~ 14:30"""
+    t = _market_minutes()
+    return 9 * 60 + 10 <= t <= 14 * 60 + 30
+
+
+def is_exit_time() -> bool:
+    """청산 체크 시간: 09:10 ~ 14:45"""
+    t = _market_minutes()
+    return 9 * 60 + 10 <= t <= 14 * 60 + 45
+
+
+# ── 스케줄 함수 ───────────────────────────────────────────────────────────────
+
+def run_morning_screening() -> None:
+    """09:00 - 워치리스트 구성"""
     if not is_trading_day():
         return
 
-    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] 상태 보고")
-    try:
-        holdings = kis_api.get_holdings()
-        hold_count = len([h for h in holdings if int(h.get("hldg_qty", 0)) > 0])
-
-        lines = [
-            f"📊 <b>오전 11시 상태 보고</b>",
-            f"모드: {os.getenv('KIS_MODE', '알 수 없음')}",
-            f"보유 종목 수: {hold_count}개",
-            f"오늘 매수 종목: {len(_bought_today)}개",
-            f"오늘 투자금: {_total_invested_today:,}원 / {MAX_TOTAL_AMOUNT:,}원",
-            f"오후 2:50 스크리닝 예정",
-        ]
-        notifier.send("\n".join(lines))
-    except Exception as e:
-        notifier.send(f"📊 오전 11시 상태 보고\n봇 정상 실행 중\n(잔고 조회 오류: {e})")
-
-
-def run_screening() -> None:
-    """14:50 - 종목 스크리닝 및 AI 분석"""
-    if not is_trading_day():
-        return
-
-    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] 스크리닝 시작")
-    notifier.send("⏰ 오후 2시 50분 - 종가베팅 후보 분석 시작")
+    global _watchlist
+    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] 오전 스크리닝 시작")
+    notifier.send("⏰ 오전 9시 - 장중매매 워치리스트 구성 시작")
 
     try:
-        candidates = screener.screen_candidates(top_n=20)
+        candidates = screener.screen_candidates(top_n=30)
 
         approved = []
         for c in candidates:
@@ -153,157 +132,257 @@ def run_screening() -> None:
             if result["buy"]:
                 approved.append(c)
 
-        notifier.notify_screening_result(approved)
+        _watchlist = approved
 
-        # 전역 저장 (매수 로직에서 사용)
-        global _screening_result
-        _screening_result = approved
-        print(f"[스크리닝 완료] AI 승인 종목: {len(approved)}개")
+        if approved:
+            lines = [f"🔍 <b>장중매매 워치리스트 {len(approved)}개</b>\n"]
+            strategy_map = {"상단매매": "🔴", "돌파매매": "🟡", "하단매매": "🔵"}
+            for c in approved:
+                emoji = strategy_map.get(c.get("strategy", ""), "⚪")
+                lines.append(
+                    f"{emoji} {c['name']}({c['code']}) - {c.get('strategy', '')}\n"
+                    f"   MA5:{c.get('ma5', 0):.0f} / 현재:{c.get('current', 0):.0f} / RSI:{c.get('rsi', 0):.0f}"
+                )
+            notifier.send("\n".join(lines))
+        else:
+            notifier.send("🔍 오늘 워치리스트 없음 - 진입 대기")
+
+        print(f"[스크리닝 완료] 워치리스트 {len(approved)}개")
 
     except Exception as e:
-        msg = f"스크리닝 오류: {e}"
+        msg = f"오전 스크리닝 오류: {e}"
         print(msg)
         notifier.notify_error(msg)
 
 
-_screening_result: list[dict] = []
-
-
-def run_buy() -> None:
-    """15:00 - 매수 실행"""
+def run_market_check() -> None:
+    """5분마다 - 진입/청산 조건 체크"""
     if not is_trading_day():
         return
 
-    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] 매수 실행")
+    if is_exit_time():
+        _check_exit()
 
-    if not _screening_result:
-        notifier.send("ℹ️ 오늘 매수 대상 없음")
+    if is_entry_time():
+        _check_entry()
+
+
+def run_status_report() -> None:
+    """11:00 - 상태 보고"""
+    if not is_trading_day():
         return
 
-    global _total_invested_today
+    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] 상태 보고")
+    try:
+        pos_lines = []
+        for code, pos in _positions.items():
+            try:
+                info = kis_api.get_stock_info(code)
+                current = float(info.get("stck_prpr", pos["buy_price"]))
+                profit_pct = (current - pos["buy_price"]) / pos["buy_price"] * 100
+                pos_lines.append(f"  {pos['name']}: {profit_pct:+.1f}% ({pos['strategy']})")
+                time.sleep(0.3)
+            except Exception:
+                pos_lines.append(f"  {pos['name']}: 조회 실패")
 
-    # 오늘 이미 최대 한도 소진 시 중단
-    if _total_invested_today >= MAX_TOTAL_AMOUNT:
-        notifier.send(f"⛔ 오늘 최대 예수금 한도 {MAX_TOTAL_AMOUNT:,}원 도달. 추가 매수 없음")
+        lines = [
+            "📊 <b>오전 11시 상태 보고</b>",
+            f"모드: {os.getenv('KIS_MODE', '알 수 없음')}",
+            f"워치리스트: {len(_watchlist)}개",
+            f"현재 보유: {len(_positions)}개",
+            f"오늘 투자금: {_total_invested_today:,}원 / {MAX_TOTAL_AMOUNT:,}원",
+        ]
+        if pos_lines:
+            lines.append("📌 보유 종목:")
+            lines.extend(pos_lines)
+
+        notifier.send("\n".join(lines))
+
+    except Exception as e:
+        notifier.send(f"📊 오전 11시 상태 보고\n봇 정상 실행 중\n(오류: {e})")
+
+
+def run_force_close() -> None:
+    """14:50 - 잔여 포지션 강제 청산"""
+    if not is_trading_day():
+        return
+    if not _positions:
+        notifier.send("✅ 14:50 - 보유 포지션 없음, 청산 불필요")
         return
 
-    # 안전장치: 최대 2종목만 매수
-    targets = _screening_result[:2]
+    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] 강제 청산 시작 ({len(_positions)}개)")
+    notifier.send(f"⏰ 14시 50분 - 잔여 포지션 {len(_positions)}개 강제 청산")
 
-    for stock in targets:
-        try:
-            # 남은 한도 계산
-            remaining = MAX_TOTAL_AMOUNT - _total_invested_today
-            buy_amount = min(MAX_BUY_AMOUNT, remaining)
-            if buy_amount <= 0:
-                notifier.send(f"⛔ 예수금 한도 초과로 {stock['name']} 매수 건너뜀")
-                break
-
-            price_info = kis_api.get_stock_info(stock["code"])
-            current_price = int(price_info.get("stck_prpr", 0))
-            if current_price == 0:
-                continue
-
-            quantity = buy_amount // current_price
-            if quantity < 1:
-                notifier.send(f"⚠️ {stock['name']}: 금액 부족 (현재가 {current_price:,}원, 가용 {buy_amount:,}원)")
-                continue
-
-            result = kis_api.buy_stock(stock["code"], quantity)
-            rt_cd = result.get("rt_cd", "")
-
-            if rt_cd == "0":
-                invested = quantity * current_price
-                _total_invested_today += invested
-                _bought_today.append({
-                    "code": stock["code"],
-                    "name": stock["name"],
-                    "quantity": quantity,
-                    "buy_price": current_price,
-                })
-                _save_state()
-                notifier.notify_buy(stock["name"], stock["code"], quantity, current_price, stock["reason"])
-            else:
-                msg = result.get("msg1", "알 수 없는 오류")
-                notifier.notify_error(f"{stock['name']} 매수 실패: {msg}")
-
-        except Exception as e:
-            notifier.notify_error(f"{stock['name']} 매수 오류: {e}")
-
+    for code, pos in list(_positions.items()):
+        if pos["name"] in SELL_BLACKLIST:
+            notifier.send(f"🚫 {pos['name']} - 매도 금지 종목, 보유 유지")
+            continue
+        _execute_sell(code, pos, "장 마감 전 강제 청산")
         time.sleep(0.5)
 
 
-def run_sell() -> None:
-    """09:01 - 봇이 직접 매수한 종목만 시초가 매도"""
-    if not is_trading_day():
-        return
+# ── 진입 로직 ─────────────────────────────────────────────────────────────────
 
-    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] 매도 실행")
-
-    if not _bought_today:
-        print("[매도] 봇이 매수한 종목 없음. 기존 보유 종목은 건드리지 않음.")
+def _check_entry() -> None:
+    """워치리스트 종목 진입 조건 체크 및 매수"""
+    if not _watchlist:
         return
 
     global _total_invested_today
+    remaining = MAX_TOTAL_AMOUNT - _total_invested_today
+    if remaining <= 0:
+        return
 
-    for stock in _bought_today:
+    already_held = set(_positions.keys())
+
+    for stock in _watchlist:
         code = stock["code"]
         name = stock["name"]
-        quantity = stock["quantity"]
-        buy_price = stock["buy_price"]
+        strategy = stock.get("strategy", "")
 
-        # 매도 금지 종목 건너뜀
-        if name in SELL_BLACKLIST:
-            print(f"[매도 건너뜀] {name} - 매도 금지 종목")
-            notifier.send(f"🚫 {name} 매도 금지 종목으로 보유 유지")
+        if code in already_held:
             continue
 
         try:
-            # 현재가 확인 후 익절/손절 판단
-            price_info = kis_api.get_stock_info(code)
-            current_price = float(price_info.get("stck_prpr", buy_price))
-            profit_pct = (current_price - buy_price) / buy_price * 100 if buy_price else 0
+            info = kis_api.get_stock_info(code)
+            current = float(info.get("stck_prpr", 0))
+            if current == 0:
+                continue
 
-            if profit_pct >= TAKE_PROFIT_PCT:
-                reason = f"익절 (+{profit_pct:.1f}% >= +{TAKE_PROFIT_PCT}%)"
-            elif profit_pct <= -STOP_LOSS_PCT:
-                reason = f"손절 ({profit_pct:.1f}% <= -{STOP_LOSS_PCT}%)"
-            else:
-                reason = f"예정 매도 ({profit_pct:+.1f}%)"
+            # 오전 스크리닝에서 계산된 지표 활용 (재호출 없이 빠른 체크)
+            ma5 = stock.get("ma5", 0)
+            ma20 = stock.get("ma20", 0)
+            high_200 = stock.get("high_200", 0)
+            high_20 = stock.get("high_20", 0)
+            rsi = stock.get("rsi", 50.0)
 
-            result = kis_api.sell_stock(code, quantity)
-            rt_cd = result.get("rt_cd", "")
+            entry_ok = False
+            if strategy == "상단매매":
+                entry_ok = (
+                    current >= ma5 and
+                    high_200 > 0 and current >= high_200 * 0.98
+                )
+            elif strategy == "하단매매":
+                entry_ok = (
+                    current >= ma5 and
+                    ma20 > 0 and current < ma20 and
+                    rsi <= 35
+                )
+            elif strategy == "돌파매매":
+                entry_ok = (
+                    high_20 > 0 and current >= high_20 * 0.995 and
+                    current >= ma5
+                )
 
-            if rt_cd == "0":
-                notifier.notify_sell(name, code, quantity, profit_pct, reason)
+            if not entry_ok:
+                continue
+
+            # 매수 실행
+            buy_amount = min(MAX_BUY_AMOUNT, remaining)
+            quantity = buy_amount // int(current)
+            if quantity < 1:
+                notifier.send(f"⚠️ {name}: 금액 부족 (현재가 {int(current):,}원)")
+                continue
+
+            result = kis_api.buy_stock(code, quantity)
+            if result.get("rt_cd") == "0":
+                invested = quantity * int(current)
+                _total_invested_today += invested
+                _positions[code] = {
+                    "name": name,
+                    "quantity": quantity,
+                    "buy_price": int(current),
+                    "strategy": strategy,
+                }
+                _save_state()
+                already_held.add(code)
+                remaining = MAX_TOTAL_AMOUNT - _total_invested_today
+                notifier.notify_buy(name, code, quantity, int(current), stock.get("reason", ""))
+
+                if remaining <= 0:
+                    break
             else:
                 msg = result.get("msg1", "알 수 없는 오류")
-                notifier.notify_error(f"{name} 매도 실패: {msg}")
+                notifier.notify_error(f"{name} 매수 실패: {msg}")
+
+            time.sleep(0.5)
 
         except Exception as e:
-            notifier.notify_error(f"{name} 매도 오류: {e}")
+            notifier.notify_error(f"{name} 진입 체크 오류: {e}")
 
-        time.sleep(0.5)
 
-    # 당일 매수 기록 초기화 및 파일 삭제
-    _bought_today.clear()
-    _total_invested_today = 0
-    _save_state()
+# ── 청산 로직 ─────────────────────────────────────────────────────────────────
 
+def _check_exit() -> None:
+    """보유 포지션 익절/손절 조건 체크"""
+    if not _positions:
+        return
+
+    for code, pos in list(_positions.items()):
+        if pos["name"] in SELL_BLACKLIST:
+            continue
+
+        try:
+            info = kis_api.get_stock_info(code)
+            current = float(info.get("stck_prpr", pos["buy_price"]))
+            profit_pct = (current - pos["buy_price"]) / pos["buy_price"] * 100
+
+            if profit_pct >= TAKE_PROFIT_PCT:
+                _execute_sell(code, pos, f"익절 (+{profit_pct:.1f}%)")
+            elif profit_pct <= -STOP_LOSS_PCT:
+                _execute_sell(code, pos, f"손절 ({profit_pct:.1f}%)")
+
+            time.sleep(0.3)
+
+        except Exception as e:
+            print(f"[청산 체크 오류] {pos['name']}: {e}")
+
+
+def _execute_sell(code: str, pos: dict, reason: str) -> None:
+    name = pos["name"]
+    quantity = pos["quantity"]
+
+    try:
+        info = kis_api.get_stock_info(code)
+        current = float(info.get("stck_prpr", pos["buy_price"]))
+        profit_pct = (current - pos["buy_price"]) / pos["buy_price"] * 100
+
+        result = kis_api.sell_stock(code, quantity)
+        if result.get("rt_cd") == "0":
+            del _positions[code]
+            _save_state()
+            notifier.notify_sell(name, code, quantity, profit_pct, reason)
+        else:
+            msg = result.get("msg1", "알 수 없는 오류")
+            notifier.notify_error(f"{name} 매도 실패: {msg}")
+
+    except Exception as e:
+        notifier.notify_error(f"{name} 매도 오류: {e}")
+
+
+# ── 메인 ──────────────────────────────────────────────────────────────────────
 
 def main():
-    print("=== KIS 자동매매 시작 (종산 종가베팅) ===")
+    print("=== KIS 자동매매 시작 (종산 장중매매) ===")
     _load_state()
-    notifier.send("🤖 자동매매 봇 시작됨\n매일 14:50 스크리닝 → 15:00 매수 → 익일 09:01 매도")
+    notifier.send(
+        "🤖 자동매매 봇 시작 (장중매매)\n"
+        "09:00 워치리스트 → 09:10~14:30 5분마다 진입\n"
+        "익절 +3% / 손절 -2% / 14:50 강제청산"
+    )
 
-    # TZ=Asia/Seoul 환경변수로 Railway 서버를 한국시간(KST)으로 고정
-    # → 아래 시간은 모두 한국시간(KST) 기준
-    schedule.every().day.at("09:01").do(run_sell)
+    # 한국시간(KST) 기준 스케줄
+    schedule.every().day.at("09:00").do(run_morning_screening)
+    schedule.every(5).minutes.do(run_market_check)
     schedule.every().day.at("11:00").do(run_status_report)
-    schedule.every().day.at("14:50").do(run_screening)
-    schedule.every().day.at("15:00").do(run_buy)
+    schedule.every().day.at("14:50").do(run_force_close)
 
-    print("스케줄 등록 완료 (한국시간 KST): 09:01 매도 / 11:00 상태보고 / 14:50 스크리닝 / 15:00 매수")
+    print("스케줄 등록 완료 (한국시간 KST):")
+    print("  09:00       - 워치리스트 스크리닝")
+    print("  09:10~14:30 - 5분마다 진입 체크")
+    print("  09:10~14:45 - 5분마다 청산 체크 (익절/손절)")
+    print("  11:00       - 상태 보고")
+    print("  14:50       - 강제 청산")
 
     while True:
         schedule.run_pending()
