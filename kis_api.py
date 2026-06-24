@@ -1,7 +1,10 @@
 import os
 import requests
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
+
+KST = ZoneInfo("Asia/Seoul")
 
 load_dotenv()
 
@@ -35,7 +38,7 @@ def _fetch_token(server_url: str) -> str:
 def _get_market_token() -> str:
     """시세/차트 조회용 토큰 (항상 실전 서버)"""
     cache = _token_cache["market"]
-    now = datetime.now()
+    now = datetime.now(KST)
     if cache["token"] and cache["expires_at"] > now:
         return cache["token"]
     cache["token"] = _fetch_token(MARKET_URL)
@@ -46,7 +49,7 @@ def _get_market_token() -> str:
 def _get_trade_token() -> str:
     """주문/계좌 조회용 토큰 (모드에 따라 실전 또는 VTS)"""
     cache = _token_cache["trade"]
-    now = datetime.now()
+    now = datetime.now(KST)
     if cache["token"] and cache["expires_at"] > now:
         return cache["token"]
     cache["token"] = _fetch_token(TRADE_URL)
@@ -117,8 +120,8 @@ def get_stock_info(stock_code: str) -> dict:
 
 def get_daily_chart(stock_code: str, days: int = 200) -> list[dict]:
     """일봉 데이터 조회 (최근 days일)"""
-    today = datetime.now().strftime("%Y%m%d")
-    start = (datetime.now() - timedelta(days=days + 50)).strftime("%Y%m%d")
+    today = datetime.now(KST).strftime("%Y%m%d")
+    start = (datetime.now(KST) - timedelta(days=days + 50)).strftime("%Y%m%d")
     res = requests.get(
         f"{MARKET_URL}/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice",
         headers=_market_headers("FHKST03010100"),

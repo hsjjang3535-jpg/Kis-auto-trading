@@ -74,6 +74,7 @@ def _save_state() -> None:
         "date": _today_kst(),
         "positions": _positions,
         "total_invested_today": _total_invested_today,
+        "trades_today": _trades_today,
     }
     try:
         with open(_STATE_FILE, "w", encoding="utf-8") as f:
@@ -83,7 +84,7 @@ def _save_state() -> None:
 
 
 def _load_state() -> None:
-    global _positions, _total_invested_today
+    global _positions, _total_invested_today, _trades_today
     if not os.path.exists(_STATE_FILE):
         return
     try:
@@ -92,8 +93,11 @@ def _load_state() -> None:
         if state.get("date") == _today_kst():
             _positions = state.get("positions", {})
             _total_invested_today = state.get("total_invested_today", 0)
+            _trades_today = state.get("trades_today", [])
             if _positions:
                 print(f"[상태 복원] 보유 포지션 {len(_positions)}개 불러옴")
+            if _trades_today:
+                print(f"[상태 복원] 오늘 체결 {len(_trades_today)}건 불러옴")
     except Exception as e:
         print(f"[상태 불러오기 오류] {e}")
 
