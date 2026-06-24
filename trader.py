@@ -12,8 +12,18 @@ import os
 import json
 import time
 import schedule
-from datetime import date, datetime
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
+
+# Railway 서버는 UTC 기준이므로 Python C라이브러리에도 KST 명시 적용
+os.environ.setdefault("TZ", "Asia/Seoul")
+try:
+    time.tzset()  # Linux/Railway 전용: C time library에도 TZ 반영
+except AttributeError:
+    pass  # Windows는 tzset 없으므로 무시
+
+KST = ZoneInfo("Asia/Seoul")
 
 import kis_api
 import screener
@@ -55,9 +65,13 @@ _trades_today: list[dict] = []
 
 # ── 상태 저장/복원 ─────────────────────────────────────────────────────────────
 
+def _today_kst() -> str:
+    return datetime.now(KST).strftime("%Y-%m-%d")
+
+
 def _save_state() -> None:
     state = {
-        "date": date.today().isoformat(),
+        "date": _today_kst(),
         "positions": _positions,
         "total_invested_today": _total_invested_today,
     }
@@ -75,7 +89,7 @@ def _load_state() -> None:
     try:
         with open(_STATE_FILE, "r", encoding="utf-8") as f:
             state = json.load(f)
-        if state.get("date") == date.today().isoformat():
+        if state.get("date") == _today_kst():
             _positions = state.get("positions", {})
             _total_invested_today = state.get("total_invested_today", 0)
             if _positions:
@@ -87,7 +101,7 @@ def _load_state() -> None:
 # ── 유틸 ──────────────────────────────────────────────────────────────────────
 
 def is_trading_day() -> bool:
-    today = datetime.now()
+    today = datetime.now(KST)
     if today.weekday() >= 5:
         return False
     if today.strftime("%Y-%m-%d") in _KR_HOLIDAYS:
@@ -97,8 +111,8 @@ def is_trading_day() -> bool:
 
 
 def _market_minutes() -> int:
-    """현재 시각을 분 단위로 반환 (예: 09:35 → 575)"""
-    now = datetime.now()
+    """현재 KST 시각을 분 단위로 반환 (예: 09:35 → 575)"""
+    now = datetime.now(KST)
     return now.hour * 60 + now.minute
 
 
@@ -122,7 +136,7 @@ def run_morning_screening() -> None:
         return
 
     global _watchlist
-    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] 오전 스크리닝 시작")
+    print(f"\n[{datetime.now(KST).strftime('%H:%M:%S')} KST] 오전 스크리닝 시작")
     notifier.send("⏰ 오전 8시 50분 - 장 시작 전 워치리스트 구성 시작")
 
     try:
@@ -178,7 +192,7 @@ def run_status_report() -> None:
     if not is_trading_day():
         return
 
-    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] 상태 보고")
+    print(f"\n[{datetime.now(KST).strftime('%H:%M:%S')} KST] 상태 보고")
     try:
         pos_lines = []
         for code, pos in _positions.items():
@@ -213,7 +227,7 @@ def run_closing_report() -> None:
     if not is_trading_day():
         return
 
-    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] 장마감 손익 보고")
+    print(f"\n[{datetime.now(KST).strftime('%H:%M:%S')} KST] 장마감 손익 보고")
 
     if not _trades_today:
         notifier.send("📋 <b>오늘 장마감 보고</b>\n매매 없음 (체결 종목 없음)")
@@ -252,7 +266,7 @@ def run_force_close() -> None:
         notifier.send("✅ 14:50 - 보유 포지션 없음, 청산 불필요")
         return
 
-    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] 강제 청산 시작 ({len(_positions)}개)")
+    print(f"\n[{datetime.now(KST).strftime('%H:%M:%S')} KST] 강제 청산 시작 ({len(_positions)}개)")
     notifier.send(f"⏰ 14시 50분 - 잔여 포지션 {len(_positions)}개 강제 청산")
 
     for code, pos in list(_positions.items()):
