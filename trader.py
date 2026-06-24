@@ -147,19 +147,34 @@ def run_morning_screening() -> None:
         candidates = screener.screen_candidates(top_n=30)
 
         approved = []
+        ai_fail_count = 0
         for c in candidates:
             result = ai_analyzer.analyze(c["name"], c["code"], c["change_rate"])
             c["buy"] = result["buy"]
             c["strength"] = result["strength"]
             c["reason"] = result["reason"]
+            if result["reason"] == "분석 실패":
+                ai_fail_count += 1
             if result["buy"]:
                 approved.append(c)
             time.sleep(2)  # Groq API 속도 제한 방지 (분당 30회)
 
+        # AI가 전부 실패한 경우 → 기술적 조건 통과 종목만으로 진행
+        ai_unavailable = candidates and ai_fail_count == len(candidates)
+        if ai_unavailable:
+            notifier.send(
+                "⚠️ <b>AI 분석 서버 일시 불가</b>\n"
+                "Groq API 전체 다운 → 기술적 조건 통과 종목으로 진행합니다."
+            )
+            approved = candidates
+            for c in approved:
+                c.setdefault("reason", "AI 분석 불가 (기술적 조건 통과)")
+
         _watchlist = approved
 
         if approved:
-            lines = [f"🔍 <b>장중매매 워치리스트 {len(approved)}개</b>\n"]
+            ai_note = " (AI 미적용)" if ai_unavailable else ""
+            lines = [f"🔍 <b>장중매매 워치리스트 {len(approved)}개{ai_note}</b>\n"]
             strategy_map = {"상단매매": "🔴", "돌파매매": "🟡", "하단매매": "🔵"}
             for c in approved:
                 emoji = strategy_map.get(c.get("strategy", ""), "⚪")

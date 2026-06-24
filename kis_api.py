@@ -255,8 +255,17 @@ def buy_stock(stock_code: str, quantity: int) -> dict:
         },
         timeout=10,
     )
+    if res.status_code == 404 and MODE != "실전":
+        raise RuntimeError(
+            f"모의투자 서버 404 오류: 계좌번호·앱키 확인 필요 (VTS 서버 {TRADE_URL})"
+        )
     res.raise_for_status()
-    return res.json()
+    data = res.json()
+    # KIS API는 HTTP 200이어도 rt_cd != "0" 이면 오류
+    if data.get("rt_cd") != "0":
+        msg = data.get("msg1", "알 수 없는 오류")
+        print(f"[매수 API 오류] {stock_code}: {msg}")
+    return data
 
 
 def sell_stock(stock_code: str, quantity: int) -> dict:
@@ -278,8 +287,16 @@ def sell_stock(stock_code: str, quantity: int) -> dict:
         },
         timeout=10,
     )
+    if res.status_code == 404 and MODE != "실전":
+        raise RuntimeError(
+            f"모의투자 서버 404 오류: 계좌번호·앱키 확인 필요 (VTS 서버 {TRADE_URL})"
+        )
     res.raise_for_status()
-    return res.json()
+    data = res.json()
+    if data.get("rt_cd") != "0":
+        msg = data.get("msg1", "알 수 없는 오류")
+        print(f"[매도 API 오류] {stock_code}: {msg}")
+    return data
 
 
 def get_holdings() -> list[dict]:
