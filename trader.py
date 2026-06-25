@@ -506,18 +506,18 @@ def main():
                 last_5min_slot = slot
                 run_market_check()
 
-        # ── 11:00 KST - 상태 보고 ────────────────────────────────────────────
-        if t >= 11 * 60 and _last_ran.get("status") != today:
+        # ── 11:00~11:10 KST - 상태 보고 ─────────────────────────────────────
+        if 11 * 60 <= t <= 11 * 60 + 10 and _last_ran.get("status") != today:
             _last_ran["status"] = today
             run_status_report()
 
-        # ── 14:50 KST - 강제 청산 ────────────────────────────────────────────
-        if t >= 14 * 60 + 50 and _last_ran.get("force_close") != today:
+        # ── 14:50~15:00 KST - 강제 청산 ─────────────────────────────────────
+        if 14 * 60 + 50 <= t <= 15 * 60 and _last_ran.get("force_close") != today:
             _last_ran["force_close"] = today
             run_force_close()
 
-        # ── 15:10 KST - 장마감 손익 보고 ─────────────────────────────────────
-        if t >= 15 * 60 + 10 and _last_ran.get("closing") != today:
+        # ── 15:10~15:30 KST - 장마감 손익 보고 ──────────────────────────────
+        if 15 * 60 + 10 <= t <= 15 * 60 + 30 and _last_ran.get("closing") != today:
             _last_ran["closing"] = today
             run_closing_report()
 
