@@ -465,12 +465,21 @@ def main():
     now_kst = datetime.now(KST).strftime("%Y-%m-%d %H:%M KST")
     notifier.send(
         f"🤖 자동매매 봇 시작 (장중매매) - {now_kst}\n"
-        "08:50 워치리스트 → 09:10~14:30 5분마다 진입\n"
-        "익절 +3% / 손절 -2% / 14:50 강제청산 / 15:10 손익보고"
+        "09:05 워치리스트 → 09:10~14:30 5분마다 진입\n"
+        "익절 +3% / 손절 -2% / 14:50 강제청산 / 15:10 손익보고\n"
+        "수동 스크리닝: 텔레그램 /screening"
     )
 
     print("KST 직접 체크 루프 시작 (schedule 라이브러리 미사용)")
     print(f"현재 KST: {datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')}")
+
+    # ── 봇 시작 시 장중이고 아직 스크리닝 안 했으면 즉시 실행 ────────────────
+    _init_t = datetime.now(KST)
+    _init_min = _init_t.hour * 60 + _init_t.minute
+    if is_trading_day() and 9 * 60 + 5 <= _init_min <= 14 * 60 + 45 and not _watchlist:
+        notifier.send("▶️ 봇 재시작 감지 - 즉시 스크리닝 실행")
+        _last_ran["screening"] = _init_t.strftime("%Y-%m-%d")
+        run_morning_screening()
 
     last_5min_slot = -1  # 마지막으로 장중 체크한 5분 슬롯
 
@@ -485,8 +494,8 @@ def main():
             last_5min_slot = -1
         _last_ran["date"] = today
 
-        # ── 08:50 KST - 워치리스트 스크리닝 ──────────────────────────────────
-        if t >= 8 * 60 + 50 and _last_ran.get("screening") != today:
+        # ── 09:05 KST - 워치리스트 스크리닝 (장 개시 후 데이터 안정화) ──────
+        if t >= 9 * 60 + 5 and _last_ran.get("screening") != today:
             _last_ran["screening"] = today
             run_morning_screening()
 
