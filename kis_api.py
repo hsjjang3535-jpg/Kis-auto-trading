@@ -79,8 +79,10 @@ def _trade_headers(tr_id: str) -> dict:
     }
 
 
-def get_top_trading_value(top_n: int = 20) -> list[dict]:
-    """거래대금 상위 종목 조회"""
+def get_top_trading_value(top_n: int = 20, market: str = "0000") -> list[dict]:
+    """거래대금 상위 종목 조회
+    market: "0000"=전체, "0001"=코스피, "1001"=코스닥
+    """
     res = requests.get(
         f"{MARKET_URL}/uapi/domestic-stock/v1/ranking/trading-value",
         headers=_market_headers("FHPST01700000"),
@@ -88,7 +90,7 @@ def get_top_trading_value(top_n: int = 20) -> list[dict]:
         params={
             "fid_cond_mrkt_div_code": "J",
             "fid_cond_scr_div_code": "20171",
-            "fid_input_iscd": "0000",
+            "fid_input_iscd": market,
             "fid_rank_sort_cls_code": "0",
             "fid_input_cnt_1": str(top_n),
             "fid_prc_cls_code": "0",

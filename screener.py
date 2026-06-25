@@ -1,168 +1,270 @@
 """
-종산 매매법 스크리너
+동적 종목 선정 시스템 (종산 매매법)
 
-상단매매 조건:
-  - 거래대금 100억 이상
-  - 현재가 5일 이동평균선 위
-  - 200일 신고가 돌파 (현재가 >= 200일 최고가의 98%)
-  - 거래량 최근 5일 평균 대비 200% 이상
-  - 윗꼬리 비율 30% 이하 (종가가 고가권)
+선정 풀:
+  1. 코스피 거래대금 상위 30개
+  2. 코스닥 거래대금 상위 30개
+  3. 테마주 (AI, 반도체, 2차전지) 중 당일 상승률 2% 이상
 
-하단매매 조건:
+필터:
+  - ETF 제외
   - 거래대금 100억 이상
-  - 현재가 20일 이동평균선 아래 (눌림목)
-  - 현재가 5일 이동평균선 위 (단기 반등 시작)
-  - 52주 신고가 대비 20% 이내 (너무 먼 종목 제외)
-  - 거래량 최근 5일 평균 대비 150% 이상
+  - 하락 종목 제외
+  - 최소 가격 1,000원 이상
 
-돌파매매 조건:
-  - 거래대금 100억 이상
-  - 최근 20일 최고가를 오늘 종가로 돌파
-  - 현재가 5일 이동평균선 위
-  - 거래량 최근 5일 평균 대비 200% 이상
-  - 윗꼬리 비율 30% 이하 (강한 돌파)
+기술 조건 (종산 매매법):
+  - 상단매매: 5일선 위, 200일 신고가 98%, 거래량 200%↑, 윗꼬리 30%↓
+  - 하단매매: 20일선 아래, 5일선 위, RSI≤30, 거래량 150%↑, 52주고가 20%이내
+  - 돌파매매: 20일 최고가 돌파, 5일선 위, 거래량 200%↑, 윗꼬리 30%↓
+
+최종 15개 선정 (상단 > 돌파 > 하단 순)
 """
+import os
 import time
 import kis_api
 
-MIN_TRADING_VALUE = 10_000_000_000  # 100억
+MIN_TRADING_VALUE = 10_000_000_000   # 100억
+MIN_PRICE = 1_000                    # 최소 주가 1,000원
+MAX_FINAL = int(os.getenv("MAX_WATCHLIST", "15"))   # 최종 워치리스트 수
+
+# ETF 이름 필터 (포함 시 제외)
+_ETF_KEYWORDS = [
+    "KODEX", "TIGER", "KBSTAR", "HANARO", "ARIRANG", "KOSEF",
+    "FOCUS", "TIMEFOLIO", "KTOP", "SOL", "ACE", "MASTER",
+    "ETF", "레버리지", "인버스",
+]
+
+# 테마주 종목코드 (AI·반도체·2차전지 주요 종목)
+_THEME_STOCKS = {
+    "AI·소프트웨어": [
+        "030800",  # 삼성SDS
+        "035420",  # NAVER
+        "035720",  # 카카오
+        "259960",  # 크래프톤
+        "263750",  # 펄어비스
+        "293490",  # 카카오게임즈
+        "042700",  # 한미반도체
+        "240810",  # 원익IPS
+    ],
+    "반도체": [
+        "005930",  # 삼성전자
+        "000660",  # SK하이닉스
+        "042700",  # 한미반도체
+        "036830",  # 솔브레인홀딩스
+        "240810",  # 원익IPS
+        "357780",  # 솔브레인
+        "336370",  # 솔루에타
+        "112610",  # 씨에스윈드
+        "071050",  # 한국금융지주
+        "038540",  # 에스에너지
+    ],
+    "2차전지": [
+        "006400",  # 삼성SDI
+        "051910",  # LG화학
+        "373220",  # LG에너지솔루션
+        "247540",  # 에코프로비엠
+        "086520",  # 에코프로
+        "402340",  # SK스페셜티
+        "000270",  # 기아
+        "005380",  # 현대차
+        "011790",  # SKC
+        "096770",  # SK이노베이션
+    ],
+}
 
 
-def _get_trading_value_won(stock: dict) -> int:
+def _is_etf(name: str) -> bool:
+    """ETF 여부 판단"""
+    name_upper = name.upper()
+    return any(kw.upper() in name_upper for kw in _ETF_KEYWORDS)
+
+
+def _get_trading_value(stock: dict) -> int:
     try:
         return int(stock.get("acml_tr_pbmn", 0))
-    except ValueError:
+    except (ValueError, TypeError):
         return 0
 
 
-def screen_candidates(top_n: int = 30) -> list[dict]:
-    """상단매매 + 하단매매 + 돌파매매 후보 통합 스크리닝"""
-    print(f"[스크리너] 거래대금 상위 {top_n}개 종목 조회 중...")
-
-    # API 일시 오류 시 최대 3회 재시도
-    top_stocks = []
+def _fetch_market_stocks(market: str, label: str, top_n: int = 30) -> list[dict]:
+    """코스피 또는 코스닥 거래대금 상위 종목 조회 (재시도 포함)"""
     for attempt in range(3):
         try:
-            top_stocks = kis_api.get_top_trading_value(top_n)
-            if top_stocks:
-                break
+            stocks = kis_api.get_top_trading_value(top_n, market=market)
+            if stocks:
+                print(f"  [{label}] {len(stocks)}개 조회 완료")
+                return stocks
         except Exception as e:
-            print(f"  ⚠️ 거래대금 조회 실패 ({attempt+1}/3): {e}")
+            print(f"  [{label}] 조회 실패 ({attempt+1}/3): {e}")
             if attempt < 2:
                 time.sleep(10)
-    if not top_stocks:
-        raise RuntimeError("거래대금 상위 종목 조회 3회 모두 실패")
+    print(f"  [{label}] 3회 모두 실패")
+    return []
 
-    upper_candidates = []
-    lower_candidates = []
-    breakout_candidates = []
 
-    for stock in top_stocks:
+def _fetch_theme_stocks() -> list[dict]:
+    """테마주 중 당일 상승률 2% 이상 종목 조회"""
+    theme_results = []
+    checked = set()
+    for theme, codes in _THEME_STOCKS.items():
+        for code in codes:
+            if code in checked:
+                continue
+            checked.add(code)
+            try:
+                info = kis_api.get_stock_info(code)
+                rate = float(info.get("prdy_ctrt", "0"))
+                if rate >= 2.0:
+                    theme_results.append({
+                        "mksc_shrn_iscd": code,
+                        "hts_kor_isnm": info.get("hts_kor_isnm", code),
+                        "acml_tr_pbmn": info.get("acml_tr_pbmn", "0"),
+                        "prdy_ctrt": str(rate),
+                        "_theme": theme,
+                    })
+                time.sleep(0.2)
+            except Exception:
+                pass
+    print(f"  [테마주] 상승 2%↑ {len(theme_results)}개")
+    return theme_results
+
+
+def _apply_technical_filter(stocks: list[dict]) -> tuple[list, list, list]:
+    """기술적 조건 필터링 → (상단, 돌파, 하단) 후보 반환"""
+    upper, breakout, lower = [], [], []
+    seen_codes = set()
+
+    for stock in stocks:
         code = stock.get("mksc_shrn_iscd", "")
         name = stock.get("hts_kor_isnm", "")
-        trading_value = _get_trading_value_won(stock)
 
-        if not code:
+        if not code or code in seen_codes:
+            continue
+        seen_codes.add(code)
+
+        # ETF 제외
+        if _is_etf(name):
             continue
 
         # 거래대금 100억 미만 제외
+        trading_value = _get_trading_value(stock)
         if trading_value < MIN_TRADING_VALUE:
-            print(f"  ❌ {name}({code}) - 거래대금 부족 ({trading_value/1e8:.0f}억)")
             continue
 
+        # 등락률
         try:
             rate = float(stock.get("prdy_ctrt", "0"))
         except ValueError:
             rate = 0.0
 
-        # 하락 종목 제외
         if rate < 0:
             continue
 
-        # 차트 지표 계산 (API 호출)
+        # 차트 지표 조회
         try:
             ind = kis_api.get_chart_indicators(code)
-            time.sleep(0.3)  # API rate limit
+            time.sleep(0.3)
         except Exception as e:
-            print(f"  ⚠️ {name}({code}) 차트 조회 실패: {e}")
+            print(f"  ⚠️ {name}({code}) 차트 실패: {e}")
             continue
 
         if not ind:
             continue
 
         current = ind["current"]
-        ma5 = ind["ma5"]
-        ma20 = ind["ma20"]
-        high_200 = ind["high_200"]
-        high_20 = ind.get("high_20", high_200)
-        vol_ratio = ind["vol_ratio"]
-        upper_tail = ind["upper_tail_ratio"]
-        rsi = ind.get("rsi", 50.0)
+        if current < MIN_PRICE:
+            continue
 
-        # 52주 신고가 조회
-        w52_high = 0
+        ma5        = ind["ma5"]
+        ma20       = ind["ma20"]
+        high_200   = ind["high_200"]
+        high_20    = ind.get("high_20", high_200)
+        vol_ratio  = ind["vol_ratio"]
+        upper_tail = ind["upper_tail_ratio"]
+        rsi        = ind.get("rsi", 50.0)
+
+        # 52주 신고가
         try:
             info = kis_api.get_stock_info(code)
             w52_high = float(info.get("w52_hgpr", 0))
-            w52_gap = (w52_high - current) / w52_high * 100 if w52_high > 0 else 100
-        except (ValueError, ZeroDivisionError):
+            w52_gap  = (w52_high - current) / w52_high * 100 if w52_high > 0 else 100
+        except Exception:
             w52_gap = 100
 
         base = {
-            "code": code,
-            "name": name,
+            "code": code, "name": name,
             "trading_value": trading_value,
-            "change_rate": rate,
-            "current": current,
-            "ma5": ma5,
-            "ma20": ma20,
-            "high_200": high_200,
-            "high_20": high_20,
-            "vol_ratio": vol_ratio,
-            "upper_tail": upper_tail,
+            "change_rate": rate, "current": current,
+            "ma5": ma5, "ma20": ma20,
+            "high_200": high_200, "high_20": high_20,
+            "vol_ratio": vol_ratio, "upper_tail": upper_tail,
             "rsi": rsi,
+            "source": stock.get("_theme", "거래대금"),
         }
 
-        # ── 상단매매 조건 ──
         upper_ok = (
             current >= ma5 and
             current >= high_200 * 0.98 and
             vol_ratio >= 2.0 and
             upper_tail <= 0.3
         )
-
-        # ── 하단매매 조건 (RSI 과매도 포함) ──
         lower_ok = (
-            current < ma20 and
-            current >= ma5 and
-            w52_gap <= 20 and
-            vol_ratio >= 1.5 and
-            rsi <= 30                             # RSI 과매도 구간
+            current < ma20 and current >= ma5 and
+            w52_gap <= 20 and vol_ratio >= 1.5 and rsi <= 30
         )
-
-        # ── 돌파매매 조건 ──
-        # 최근 20일 고가를 오늘 종가로 돌파 (상단매매와 별개)
         breakout_ok = (
-            current >= high_20 * 0.995 and       # 20일 최고가 돌파 (0.5% 여유)
-            current >= ma5 and                    # 5일선 위
-            vol_ratio >= 2.0 and                  # 거래량 200% 이상 (강한 돌파 확인)
-            upper_tail <= 0.3 and                 # 윗꼬리 짧음 (돌파 유지)
-            not upper_ok                          # 상단매매와 중복 제외
+            high_20 > 0 and current >= high_20 * 0.995 and
+            current >= ma5 and vol_ratio >= 2.0 and
+            upper_tail <= 0.3 and not upper_ok
         )
 
         if upper_ok:
-            upper_candidates.append({**base, "strategy": "상단매매"})
-            print(f"  🔴 상단매매: {name}({code}) {rate:+.1f}% 거래량{vol_ratio:.1f}x RSI{rsi:.0f}")
+            upper.append({**base, "strategy": "상단매매"})
+            print(f"  🔴 상단: {name}({code}) {rate:+.1f}% 거래량{vol_ratio:.1f}x [{base['source']}]")
         elif breakout_ok:
-            breakout_candidates.append({**base, "strategy": "돌파매매"})
-            print(f"  🟡 돌파매매: {name}({code}) {rate:+.1f}% 20일고가 돌파 거래량{vol_ratio:.1f}x")
+            breakout.append({**base, "strategy": "돌파매매"})
+            print(f"  🟡 돌파: {name}({code}) {rate:+.1f}% 20일고가돌파 [{base['source']}]")
         elif lower_ok:
-            lower_candidates.append({**base, "strategy": "하단매매"})
-            print(f"  🔵 하단매매: {name}({code}) {rate:+.1f}% RSI{rsi:.0f} 과매도 눌림목")
-        else:
-            print(f"  ❌ 제외: {name}({code}) RSI{rsi:.0f}")
+            lower.append({**base, "strategy": "하단매매"})
+            print(f"  🔵 하단: {name}({code}) {rate:+.1f}% RSI{rsi:.0f} [{base['source']}]")
 
-    # 우선순위: 상단매매 > 돌파매매 > 하단매매
-    all_candidates = upper_candidates + breakout_candidates + lower_candidates
-    print(f"\n[스크리너] 상단 {len(upper_candidates)}개 / 돌파 {len(breakout_candidates)}개 / 하단 {len(lower_candidates)}개")
-    return all_candidates
+    return upper, breakout, lower
+
+
+def screen_candidates(top_n: int = 30) -> list[dict]:
+    """동적 종목 선정 (코스피30 + 코스닥30 + 테마주 → 최종 15개)"""
+    print(f"\n[스크리너] 동적 종목 선정 시작")
+
+    # 1. 코스피 + 코스닥 + 테마주 수집
+    kospi  = _fetch_market_stocks("0001", "코스피", top_n)
+    time.sleep(0.5)
+    kosdaq = _fetch_market_stocks("1001", "코스닥", top_n)
+    time.sleep(0.5)
+    theme  = _fetch_theme_stocks()
+
+    # 중복 제거 후 통합 (코스피 → 코스닥 → 테마 순)
+    all_stocks: list[dict] = []
+    seen = set()
+    for s in kospi + kosdaq + theme:
+        code = s.get("mksc_shrn_iscd", "")
+        if code and code not in seen:
+            seen.add(code)
+            all_stocks.append(s)
+
+    print(f"[스크리너] 총 {len(all_stocks)}개 후보 (코스피{len(kospi)} + 코스닥{len(kosdaq)} + 테마{len(theme)})")
+
+    if not all_stocks:
+        raise RuntimeError("종목 조회 실패 - 모든 소스에서 빈 결과")
+
+    # 2. 기술적 조건 필터링
+    upper, breakout, lower = _apply_technical_filter(all_stocks)
+
+    # 3. 우선순위 정렬 후 최종 MAX_FINAL개 선정
+    combined = upper + breakout + lower
+    final = combined[:MAX_FINAL]
+
+    print(
+        f"\n[스크리너 완료] 상단 {len(upper)}개 / 돌파 {len(breakout)}개 / 하단 {len(lower)}개 "
+        f"→ 최종 {len(final)}개 선정"
+    )
+    return final
