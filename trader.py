@@ -482,6 +482,11 @@ def main():
     print("=== KIS 자동매매 시작 (종산 장중매매) ===")
     _load_state()
 
+    # HTTP API 서버를 별도 스레드로 시작 (텔레그램 봇 연동)
+    import api_server, threading
+    api_thread = threading.Thread(target=api_server.start_api_server, daemon=True)
+    api_thread.start()
+
     now_kst = datetime.now(KST).strftime("%Y-%m-%d %H:%M KST")
     notifier.send(
         f"🤖 자동매매 봇 시작 (장중매매) - {now_kst}\n"
