@@ -83,3 +83,48 @@ def analyze(stock_name: str, code: str, change_rate: float) -> dict:
             break
 
     return {"buy": False, "strength": "없음", "reason": "분석 실패"}
+
+
+def analyze_closing_bet(stock_name: str, code: str, change_rate: float) -> dict:
+    """종가베팅 AI 분석 - 오버나이트 보유 적합성 판단"""
+    news = fetch_news(stock_name)
+
+    prompt = f"""
+당신은 한국 주식 단기매매 전문가입니다. 종가베팅(장 마감 직전 매수, 다음날 시초가 매도) 관점에서 아래 종목을 분석해주세요.
+
+종목명: {stock_name} ({code})
+당일 등락률: {change_rate:+.2f}%
+관련 뉴스:
+{news}
+
+다음 기준으로 평가하세요:
+1. 명확한 상승 재료(뉴스/이슈)가 있어 오버나이트 보유 시 내일도 추가 상승 가능한가?
+2. 리스크(악재, 단기 급등 후 되돌림 가능성)는 없는가?
+3. 내일 시초가 갭상승 가능성이 있는가?
+
+반드시 아래 JSON 형식으로만 답하세요:
+{{"buy": true/false, "strength": "강/중/약/없음", "reason": "한 줄 요약"}}
+"""
+
+    import json, re
+    for model in _MODELS:
+        try:
+            response = groq_client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.2,
+            )
+            text = response.choices[0].message.content.strip()
+            match = re.search(r'\{.*\}', text, re.DOTALL)
+            if match:
+                return json.loads(match.group())
+            break
+        except Exception as e:
+            err_str = str(e).lower()
+            if "503" in err_str or "overcapacity" in err_str or "overloaded" in err_str:
+                print(f"[AI] {model} 과부하, 다음 모델 시도...")
+                continue
+            print(f"[AI 종가베팅 분석 오류] {e}")
+            break
+
+    return {"buy": False, "strength": "없음", "reason": "분석 실패"}

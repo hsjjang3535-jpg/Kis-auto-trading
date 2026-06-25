@@ -231,6 +231,85 @@ def _apply_technical_filter(stocks: list[dict]) -> tuple[list, list, list]:
     return upper, breakout, lower
 
 
+def screen_closing_bet_candidates(top_n: int = 20) -> list[dict]:
+    """종가베팅 후보 선정 (14:00 스크리닝)
+
+    조건:
+    - 당일 상승률 2% 이상
+    - 5일선 위 (상승 추세)
+    - 거래량 2배 이상 (모멘텀 확인)
+    - RSI 40~75 (적정 모멘텀, 과열 아님)
+    - 최대 5개 선정
+    """
+    print("\n[종가베팅 스크리너] 후보 선정 시작")
+
+    kospi  = _fetch_market_stocks("0001", "코스피(종가)", top_n)
+    time.sleep(0.5)
+    kosdaq = _fetch_market_stocks("1001", "코스닥(종가)", top_n)
+
+    all_stocks: list[dict] = []
+    seen: set[str] = set()
+    for s in kospi + kosdaq:
+        code = s.get("mksc_shrn_iscd", "")
+        if code and code not in seen:
+            seen.add(code)
+            all_stocks.append(s)
+
+    candidates = []
+    for stock in all_stocks:
+        code = stock.get("mksc_shrn_iscd", "")
+        name = stock.get("hts_kor_isnm", "")
+
+        if not code or _is_etf(name):
+            continue
+        if _get_trading_value(stock) < MIN_TRADING_VALUE:
+            continue
+
+        try:
+            rate = float(stock.get("prdy_ctrt", "0"))
+        except ValueError:
+            rate = 0.0
+
+        if rate < 2.0:  # 당일 2% 이상 상승만
+            continue
+
+        try:
+            ind = kis_api.get_chart_indicators(code)
+            time.sleep(0.3)
+        except Exception as e:
+            print(f"  ⚠️ {name}({code}) 차트 실패: {e}")
+            continue
+
+        if not ind:
+            continue
+
+        current = ind["current"]
+        if current < MIN_PRICE:
+            continue
+
+        ma5 = ind["ma5"]
+        vol_ratio = ind["vol_ratio"]
+        rsi = ind.get("rsi", 50.0)
+
+        if current >= ma5 and vol_ratio >= 2.0 and 40 <= rsi <= 75:
+            candidates.append({
+                "code": code,
+                "name": name,
+                "change_rate": rate,
+                "current": current,
+                "ma5": ma5,
+                "vol_ratio": vol_ratio,
+                "rsi": rsi,
+                "strategy": "종가베팅",
+            })
+            print(f"  🌙 종가베팅: {name}({code}) {rate:+.1f}% RSI{rsi:.0f} 거래량{vol_ratio:.1f}x")
+
+    candidates.sort(key=lambda x: x["change_rate"], reverse=True)
+    result = candidates[:5]
+    print(f"\n[종가베팅 스크리너 완료] 최종 {len(result)}개 선정")
+    return result
+
+
 def screen_candidates(top_n: int = 30) -> list[dict]:
     """동적 종목 선정 (코스피30 + 코스닥30 + 테마주 → 최종 15개)"""
     print(f"\n[스크리너] 동적 종목 선정 시작")

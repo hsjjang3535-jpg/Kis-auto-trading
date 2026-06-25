@@ -1,11 +1,14 @@
 """
-자동매매 메인 로직 (장중매매)
+자동매매 메인 로직 (장중매매 + 종가베팅)
 
-스케줄 (한국시간 KST, TZ=Asia/Seoul):
-  08:50 - 워치리스트 스크리닝 (전날 차트 기준)
-  09:10 ~ 14:45 - 5분마다 진입/청산 조건 체크
+스케줄 (한국시간 KST):
+  09:00 - 종가베팅 포지션 시초가 매도 (전일 보유분)
+  09:05 - 장중매매 워치리스트 스크리닝
+  09:10 ~ 14:45 - 5분마다 장중매매 진입/청산 체크
   11:00 - 상태 보고
-  14:50 - 잔여 포지션 강제 청산
+  14:00 - 종가베팅 스크리닝
+  14:20 ~ 14:50 - 5분마다 종가베팅 매수 체크
+  14:50 - 장중매매 잔여 포지션 강제 청산 (종가베팅 제외)
   15:10 - 장마감 손익 보고
 """
 import os
@@ -35,6 +38,9 @@ TRAILING_STOP_PCT = float(os.getenv("TRAILING_STOP_PCT", "1.0"))
 DYNAMIC_CAPITAL = os.getenv("DYNAMIC_CAPITAL", "true").lower() == "true"
 # 1회 매수금액 = 예수금의 이 비율 (기본 50%)
 BUY_RATIO = float(os.getenv("BUY_RATIO", "0.5"))
+# 종가베팅 자금 한도 (별도 관리)
+MAX_CLOSING_AMOUNT = int(os.getenv("MAX_CLOSING_AMOUNT", "500000"))  # 종가베팅 총 한도
+MAX_CLOSING_BUY = int(os.getenv("MAX_CLOSING_BUY", "250000"))        # 종가베팅 1회 매수
 
 _STATE_FILE = "trading_state.json"
 
@@ -47,17 +53,26 @@ _KR_HOLIDAYS = {
     "2027-08-15", "2027-10-03", "2027-10-09", "2027-12-25", "2027-12-31",
 }
 
-# 오전 스크리닝으로 구성된 워치리스트
+# 오전 스크리닝으로 구성된 워치리스트 (장중매매)
 _watchlist: list[dict] = []
 
-# 현재 보유 포지션 { 종목코드: {name, quantity, buy_price, strategy} }
+# 현재 보유 포지션 (장중매매) { 종목코드: {name, quantity, buy_price, strategy} }
 _positions: dict[str, dict] = {}
 
-# 오늘 총 투자금
+# 오늘 장중매매 총 투자금
 _total_invested_today: int = 0
 
-# 오늘 체결된 매도 기록 (손익 보고용)
-# { name, code, quantity, buy_price, sell_price, profit_pct, profit_won, reason }
+# 종가베팅 워치리스트 (14:00 스크리닝)
+_closing_watchlist: list[dict] = []
+
+# 종가베팅 오버나이트 포지션 { 종목코드: {name, quantity, buy_price, buy_date} }
+_closing_positions: dict[str, dict] = {}
+
+# 오늘 종가베팅 투자금
+_closing_invested_today: int = 0
+
+# 오늘 체결된 매도 기록 (장중 + 종가베팅 모두 포함, 손익 보고용)
+# { name, code, quantity, buy_price, sell_price, profit_pct, profit_won, reason, strategy }
 _trades_today: list[dict] = []
 
 
@@ -73,6 +88,8 @@ def _save_state() -> None:
         "positions": _positions,
         "total_invested_today": _total_invested_today,
         "trades_today": _trades_today,
+        "closing_positions": _closing_positions,       # 오버나이트 유지
+        "closing_invested_today": _closing_invested_today,
     }
     try:
         with open(_STATE_FILE, "w", encoding="utf-8") as f:
@@ -83,17 +100,26 @@ def _save_state() -> None:
 
 def _load_state() -> None:
     global _positions, _total_invested_today, _trades_today
+    global _closing_positions, _closing_invested_today
     if not os.path.exists(_STATE_FILE):
         return
     try:
         with open(_STATE_FILE, "r", encoding="utf-8") as f:
             state = json.load(f)
+
+        # 종가베팅 포지션은 날짜와 무관하게 항상 불러옴 (오버나이트 포지션)
+        _closing_positions = state.get("closing_positions", {})
+        if _closing_positions:
+            print(f"[상태 복원] 종가베팅 포지션 {len(_closing_positions)}개 불러옴 (오버나이트)")
+
+        # 장중 포지션은 오늘 날짜인 경우만
         if state.get("date") == _today_kst():
             _positions = state.get("positions", {})
             _total_invested_today = state.get("total_invested_today", 0)
             _trades_today = state.get("trades_today", [])
+            _closing_invested_today = state.get("closing_invested_today", 0)
             if _positions:
-                print(f"[상태 복원] 보유 포지션 {len(_positions)}개 불러옴")
+                print(f"[상태 복원] 장중 포지션 {len(_positions)}개 불러옴")
             if _trades_today:
                 print(f"[상태 복원] 오늘 체결 {len(_trades_today)}건 불러옴")
     except Exception as e:
@@ -157,6 +183,74 @@ def _update_capital() -> None:
             )
     except Exception as e:
         print(f"[자금관리] 예수금 조회 오류: {e}")
+
+
+def run_morning_sell_closing_bet() -> None:
+    """09:00 - 종가베팅 포지션 시초가 매도 (전일 매수분)"""
+    if not is_trading_day():
+        return
+    if not _closing_positions:
+        return
+
+    count = len(_closing_positions)
+    print(f"\n[{datetime.now(KST).strftime('%H:%M:%S')} KST] 종가베팅 시초가 매도 ({count}개)")
+    notifier.send(f"🌅 09:00 - 종가베팅 포지션 {count}개 시초가 매도 시작")
+
+    for code, pos in list(_closing_positions.items()):
+        _execute_closing_sell(code, pos, "종가베팅 시초가 매도")
+        time.sleep(0.5)
+
+
+def run_closing_bet_screening() -> None:
+    """14:00 - 종가베팅 워치리스트 구성"""
+    if not is_trading_day():
+        return
+
+    global _closing_watchlist
+    print(f"\n[{datetime.now(KST).strftime('%H:%M:%S')} KST] 종가베팅 스크리닝 시작")
+    notifier.send("⏰ 오후 2시 - 종가베팅 후보 스크리닝 시작")
+
+    try:
+        candidates = screener.screen_closing_bet_candidates(top_n=20)
+
+        approved = []
+        ai_fail_count = 0
+        for c in candidates:
+            result = ai_analyzer.analyze_closing_bet(c["name"], c["code"], c["change_rate"])
+            c["buy"] = result["buy"]
+            c["strength"] = result["strength"]
+            c["reason"] = result["reason"]
+            if result["reason"] == "분석 실패":
+                ai_fail_count += 1
+            if result["buy"]:
+                approved.append(c)
+            time.sleep(2)
+
+        if candidates and ai_fail_count == len(candidates):
+            approved = candidates
+            for c in approved:
+                c.setdefault("reason", "AI 분석 불가 (기술적 조건 통과)")
+
+        _closing_watchlist = approved
+
+        if approved:
+            lines = [f"🌙 <b>종가베팅 워치리스트 {len(approved)}개</b>\n"]
+            for c in approved:
+                lines.append(
+                    f"🟣 {c['name']}({c['code']}) {c['change_rate']:+.1f}%\n"
+                    f"   RSI:{c.get('rsi', 0):.0f} / 거래량{c.get('vol_ratio', 0):.1f}x\n"
+                    f"   사유: {c.get('reason', '-')}"
+                )
+            notifier.send("\n".join(lines))
+        else:
+            notifier.send("🌙 종가베팅 워치리스트 없음 - 매수 없음")
+
+        print(f"[종가베팅 스크리닝 완료] {len(approved)}개")
+
+    except Exception as e:
+        msg = f"종가베팅 스크리닝 오류: {e}"
+        print(msg)
+        notifier.notify_error(msg)
 
 
 def run_morning_screening() -> None:
@@ -250,16 +344,34 @@ def run_status_report() -> None:
             except Exception:
                 pos_lines.append(f"  {pos['name']}: 조회 실패")
 
+        # 종가베팅 포지션 현황
+        closing_lines = []
+        for code, pos in _closing_positions.items():
+            try:
+                info = kis_api.get_stock_info(code)
+                current = float(info.get("stck_prpr", pos["buy_price"]))
+                profit_pct = (current - pos["buy_price"]) / pos["buy_price"] * 100
+                closing_lines.append(
+                    f"  🌙{pos['name']}: {profit_pct:+.1f}% (매수일:{pos.get('buy_date','-')})"
+                )
+                time.sleep(0.3)
+            except Exception:
+                closing_lines.append(f"  🌙{pos['name']}: 조회 실패")
+
         lines = [
             "📊 <b>오전 11시 상태 보고</b>",
             f"모드: {os.getenv('KIS_MODE', '알 수 없음')}",
-            f"워치리스트: {len(_watchlist)}개",
-            f"현재 보유: {len(_positions)}개",
-            f"오늘 투자금: {_total_invested_today:,}원 / {MAX_TOTAL_AMOUNT:,}원",
+            f"장중매매 - 워치리스트: {len(_watchlist)}개 / 보유: {len(_positions)}개",
+            f"장중 투자금: {_total_invested_today:,}원 / {MAX_TOTAL_AMOUNT:,}원",
+            f"종가베팅 - 워치리스트: {len(_closing_watchlist)}개 / 보유: {len(_closing_positions)}개",
+            f"종가베팅 투자금: {_closing_invested_today:,}원 / {MAX_CLOSING_AMOUNT:,}원",
         ]
         if pos_lines:
-            lines.append("📌 보유 종목:")
+            lines.append("📌 장중 보유 종목:")
             lines.extend(pos_lines)
+        if closing_lines:
+            lines.append("🌙 종가베팅 보유 종목:")
+            lines.extend(closing_lines)
 
         notifier.send("\n".join(lines))
 
@@ -288,26 +400,51 @@ def run_closing_report() -> None:
     total_loss   = sum(t["profit_won"] for t in lose_trades)
     net = total_profit + total_loss
 
+    intraday = [t for t in _trades_today if t.get("strategy") != "종가베팅"]
+    closing_bet = [t for t in _trades_today if t.get("strategy") == "종가베팅"]
+
     lines = [f"📋 <b>오늘 장마감 보고 ({today})</b>\n"]
 
-    for t in _trades_today:
-        is_profit = t["profit_won"] > 0
-        emoji = "📈" if is_profit else "📉"
-        sign  = "+" if is_profit else ""
+    if intraday:
+        lines.append("━━ 📈 장중매매 ━━")
+        for t in intraday:
+            is_profit = t["profit_won"] > 0
+            emoji = "📈" if is_profit else "📉"
+            sign  = "+" if is_profit else ""
+            lines.append(
+                f"{emoji} <b>{t['name']} ({t['code']})</b>\n"
+                f"   전략: {t.get('strategy', '-')}\n"
+                f"   매수가: {t['buy_price']:,}원 | 수량: {t['quantity']}주\n"
+                f"   매도가: {t['sell_price']:,}원\n"
+                f"   매수사유: {t.get('buy_reason', '-')}\n"
+                f"   결과: {sign}{t['profit_pct']}% ({sign}{t['profit_won']:,}원)\n"
+                f"   매도사유: {t.get('sell_reason', '-')}"
+            )
 
-        lines.append(
-            f"{emoji} <b>{t['name']} ({t['code']})</b>\n"
-            f"   전략: {t.get('strategy', '-')}\n"
-            f"   매수가: {t['buy_price']:,}원 | 수량: {t['quantity']}주\n"
-            f"   매도가: {t['sell_price']:,}원\n"
-            f"   매수사유: {t.get('buy_reason', '-')}\n"
-            f"   결과: {sign}{t['profit_pct']}% ({sign}{t['profit_won']:,}원)\n"
-            f"   매도사유: {t.get('sell_reason', '-')}"
-        )
+    if closing_bet:
+        lines.append("\n━━ 🌙 종가베팅 ━━")
+        for t in closing_bet:
+            is_profit = t["profit_won"] > 0
+            emoji = "📈" if is_profit else "📉"
+            sign  = "+" if is_profit else ""
+            lines.append(
+                f"{emoji} <b>{t['name']} ({t['code']})</b>\n"
+                f"   매수가: {t['buy_price']:,}원 | 수량: {t['quantity']}주\n"
+                f"   매도가: {t['sell_price']:,}원\n"
+                f"   매수사유: {t.get('buy_reason', '-')}\n"
+                f"   결과: {sign}{t['profit_pct']}% ({sign}{t['profit_won']:,}원)\n"
+                f"   매도사유: {t.get('sell_reason', '-')}"
+            )
+
+    # 종가베팅 미청산 포지션 (오늘 매수, 내일 매도 예정)
+    if _closing_positions:
+        lines.append(f"\n🌙 종가베팅 오버나이트 {len(_closing_positions)}개 보유 (내일 09:00 시초가 매도)")
+        for code, pos in _closing_positions.items():
+            lines.append(f"   {pos['name']}({code}) {pos['buy_price']:,}원 {pos['quantity']}주")
 
     lines.append("")
     lines.append("─────────────────────")
-    lines.append(f"총 매매: {len(_trades_today)}건")
+    lines.append(f"총 매매: {len(_trades_today)}건 (장중 {len(intraday)} + 종가베팅 {len(closing_bet)})")
     lines.append(f"  익절 {len(win_trades)}건: +{total_profit:,}원")
     lines.append(f"  손절 {len(lose_trades)}건: {total_loss:,}원")
     net_sign = "+" if net >= 0 else ""
@@ -317,15 +454,19 @@ def run_closing_report() -> None:
 
 
 def run_force_close() -> None:
-    """14:50 - 잔여 포지션 강제 청산"""
+    """14:50 - 장중매매 잔여 포지션 강제 청산 (종가베팅 포지션은 오버나이트 유지)"""
     if not is_trading_day():
         return
     if not _positions:
-        notifier.send("✅ 14:50 - 보유 포지션 없음, 청산 불필요")
+        msg = "✅ 14:50 - 장중 포지션 없음, 청산 불필요"
+        if _closing_positions:
+            msg += f"\n🌙 종가베팅 {len(_closing_positions)}개 오버나이트 유지"
+        notifier.send(msg)
         return
 
     print(f"\n[{datetime.now(KST).strftime('%H:%M:%S')} KST] 강제 청산 시작 ({len(_positions)}개)")
-    notifier.send(f"⏰ 14시 50분 - 잔여 포지션 {len(_positions)}개 강제 청산")
+    closing_note = f" | 🌙 종가베팅 {len(_closing_positions)}개 오버나이트 유지" if _closing_positions else ""
+    notifier.send(f"⏰ 14시 50분 - 장중 잔여 포지션 {len(_positions)}개 강제 청산{closing_note}")
 
     for code, pos in list(_positions.items()):
         if pos["name"] in SELL_BLACKLIST:
@@ -335,7 +476,105 @@ def run_force_close() -> None:
         time.sleep(0.5)
 
 
-# ── 진입 로직 ─────────────────────────────────────────────────────────────────
+# ── 종가베팅 진입/청산 로직 ────────────────────────────────────────────────────
+
+def _check_closing_bet_entry() -> None:
+    """종가베팅 매수 체크 (14:20~14:50, 5분마다)"""
+    if not _closing_watchlist:
+        return
+
+    global _closing_invested_today
+    remaining = MAX_CLOSING_AMOUNT - _closing_invested_today
+    if remaining <= 0:
+        return
+
+    already_held = set(_closing_positions.keys())
+
+    for stock in _closing_watchlist:
+        code = stock["code"]
+        name = stock["name"]
+
+        if code in already_held:
+            continue
+
+        try:
+            info = kis_api.get_stock_info(code)
+            current = float(info.get("stck_prpr", 0))
+            if current == 0:
+                continue
+
+            buy_amount = min(MAX_CLOSING_BUY, remaining)
+            quantity = buy_amount // int(current)
+            if quantity < 1:
+                notifier.send(f"⚠️ {name}: 종가베팅 금액 부족 (현재가 {int(current):,}원)")
+                continue
+
+            result = kis_api.buy_stock(code, quantity)
+            if result.get("rt_cd") == "0":
+                invested = quantity * int(current)
+                _closing_invested_today += invested
+                _closing_positions[code] = {
+                    "name": name,
+                    "quantity": quantity,
+                    "buy_price": int(current),
+                    "strategy": "종가베팅",
+                    "buy_reason": stock.get("reason", ""),
+                    "buy_date": _today_kst(),
+                }
+                _save_state()
+                already_held.add(code)
+                remaining = MAX_CLOSING_AMOUNT - _closing_invested_today
+                notifier.notify_buy(name, code, quantity, int(current), f"[종가베팅] {stock.get('reason', '')}")
+
+                if remaining <= 0:
+                    break
+            else:
+                msg = result.get("msg1", "알 수 없는 오류")
+                notifier.notify_error(f"{name} 종가베팅 매수 실패: {msg}")
+
+            time.sleep(0.5)
+
+        except Exception as e:
+            notifier.notify_error(f"{name} 종가베팅 진입 오류: {e}")
+
+
+def _execute_closing_sell(code: str, pos: dict, reason: str) -> None:
+    """종가베팅 포지션 매도 및 손익 기록"""
+    name = pos["name"]
+    quantity = pos["quantity"]
+
+    try:
+        info = kis_api.get_stock_info(code)
+        current = float(info.get("stck_prpr", pos["buy_price"]))
+        profit_pct = (current - pos["buy_price"]) / pos["buy_price"] * 100
+
+        result = kis_api.sell_stock(code, quantity)
+        if result.get("rt_cd") == "0":
+            profit_won = int((current - pos["buy_price"]) * quantity)
+            _trades_today.append({
+                "name": name,
+                "code": code,
+                "quantity": quantity,
+                "buy_price": pos["buy_price"],
+                "sell_price": int(current),
+                "profit_pct": round(profit_pct, 2),
+                "profit_won": profit_won,
+                "sell_reason": reason,
+                "buy_reason": pos.get("buy_reason", ""),
+                "strategy": "종가베팅",
+            })
+            del _closing_positions[code]
+            _save_state()
+            notifier.notify_sell(name, code, quantity, profit_pct, reason)
+        else:
+            msg = result.get("msg1", "알 수 없는 오류")
+            notifier.notify_error(f"{name} 종가베팅 매도 실패: {msg}")
+
+    except Exception as e:
+        notifier.notify_error(f"{name} 종가베팅 매도 오류: {e}")
+
+
+# ── 장중매매 진입 로직 ─────────────────────────────────────────────────────────
 
 def _check_entry() -> None:
     """워치리스트 종목 진입 조건 체크 및 매수"""
@@ -514,11 +753,15 @@ _last_ran: dict[str, str] = {}
 
 
 def _reset_daily_state() -> None:
-    """자정이 지나 날짜가 바뀌면 일별 데이터 초기화"""
-    global _watchlist, _trades_today, _total_invested_today
+    """자정이 지나 날짜가 바뀌면 일별 데이터 초기화 (종가베팅 오버나이트 포지션은 유지)"""
+    global _watchlist, _closing_watchlist, _trades_today
+    global _total_invested_today, _closing_invested_today
     _watchlist = []
+    _closing_watchlist = []
     _trades_today = []
     _total_invested_today = 0
+    _closing_invested_today = 0
+    # _closing_positions는 초기화 안 함 - 오버나이트 포지션 유지
     _save_state()
     print(f"[일별 초기화] {_today_kst()} 새 거래일 시작")
 
@@ -535,25 +778,38 @@ def main():
     api_thread.start()
 
     now_kst = datetime.now(KST).strftime("%Y-%m-%d %H:%M KST")
+    closing_pos_note = f"\n🌙 종가베팅 오버나이트 {len(_closing_positions)}개 보유 중" if _closing_positions else ""
     notifier.send(
-        f"🤖 자동매매 봇 시작 (장중매매) - {now_kst}\n"
-        "⏰ 09:05 스크리닝 → 09:10~14:30 5분마다 진입\n"
-        "✅ 익절 +3% / 손절 -2% / 14:50 강제청산 / 15:10 손익보고"
+        f"🤖 자동매매 봇 시작 (장중매매 + 종가베팅) - {now_kst}\n"
+        "📌 장중매매: 09:05 스크리닝 → 09:10~14:30 진입 → 14:50 강제청산\n"
+        "🌙 종가베팅: 14:00 스크리닝 → 14:20~14:50 매수 → 익일 09:00 시초가 매도\n"
+        f"✅ 익절 트레일링 +{TAKE_PROFIT_PCT}% / 손절 -{STOP_LOSS_PCT}% / 15:10 손익보고"
+        f"{closing_pos_note}"
     )
 
     print("KST 직접 체크 루프 시작 (schedule 라이브러리 미사용)")
     print(f"현재 KST: {datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')}")
 
-    # ── 봇 시작 시 스크리닝 시간대(09:05~09:30)에 재시작됐으면 즉시 실행 ──
-    # (장마감 후 재배포 시 불필요한 API 호출 방지)
+    # ── 봇 재시작 시 즉시 실행 체크 ──────────────────────────────────────────────
     _init_t = datetime.now(KST)
     _init_min = _init_t.hour * 60 + _init_t.minute
-    if is_trading_day() and 9 * 60 + 5 <= _init_min <= 9 * 60 + 30 and not _watchlist:
-        notifier.send("▶️ 봇 재시작 감지 (스크리닝 시간) - 즉시 스크리닝 실행")
-        _last_ran["screening"] = _init_t.strftime("%Y-%m-%d")
-        run_morning_screening()
+    _init_today = _init_t.strftime("%Y-%m-%d")
 
-    last_5min_slot = -1  # 마지막으로 장중 체크한 5분 슬롯
+    if is_trading_day():
+        # 09:00~09:10 재시작: 종가베팅 포지션 즉시 매도
+        if 9 * 60 <= _init_min <= 9 * 60 + 10 and _closing_positions:
+            notifier.send("▶️ 봇 재시작 감지 (09:00 시간대) - 종가베팅 즉시 매도")
+            _last_ran["closing_sell"] = _init_today
+            run_morning_sell_closing_bet()
+
+        # 09:05~09:30 재시작: 장중매매 스크리닝 즉시 실행
+        if 9 * 60 + 5 <= _init_min <= 9 * 60 + 30 and not _watchlist:
+            notifier.send("▶️ 봇 재시작 감지 (스크리닝 시간) - 즉시 스크리닝 실행")
+            _last_ran["screening"] = _init_today
+            run_morning_screening()
+
+    last_5min_slot = -1       # 장중매매 5분 슬롯
+    last_closing_slot = -1    # 종가베팅 5분 슬롯
 
     while True:
         now = datetime.now(KST)
@@ -564,16 +820,22 @@ def main():
         if _last_ran.get("date") and _last_ran["date"] != today:
             _reset_daily_state()
             last_5min_slot = -1
+            last_closing_slot = -1
         _last_ran["date"] = today
 
-        # ── 09:05~09:30 KST - 워치리스트 스크리닝 (장 개시 후 데이터 안정화) ──
+        # ── 09:00~09:10 KST - 종가베팅 시초가 매도 ──────────────────────────
+        if 9 * 60 <= t <= 9 * 60 + 10 and _last_ran.get("closing_sell") != today:
+            _last_ran["closing_sell"] = today
+            run_morning_sell_closing_bet()
+
+        # ── 09:05~09:30 KST - 장중매매 워치리스트 스크리닝 ──────────────────
         if 9 * 60 + 5 <= t <= 9 * 60 + 30 and _last_ran.get("screening") != today:
             _last_ran["screening"] = today
             run_morning_screening()
 
         # ── 09:10~14:45 KST - 5분마다 장중 진입/청산 체크 ───────────────────
         if 9 * 60 + 10 <= t <= 14 * 60 + 45:
-            slot = t // 5  # 5분 단위 슬롯 번호 (분이 바뀌기 전까지 같은 값)
+            slot = t // 5
             if slot != last_5min_slot:
                 last_5min_slot = slot
                 run_market_check()
@@ -583,7 +845,19 @@ def main():
             _last_ran["status"] = today
             run_status_report()
 
-        # ── 14:50~15:00 KST - 강제 청산 ─────────────────────────────────────
+        # ── 14:00~14:15 KST - 종가베팅 스크리닝 ─────────────────────────────
+        if 14 * 60 <= t <= 14 * 60 + 15 and _last_ran.get("closing_bet_screening") != today:
+            _last_ran["closing_bet_screening"] = today
+            run_closing_bet_screening()
+
+        # ── 14:20~14:50 KST - 5분마다 종가베팅 매수 체크 ───────────────────
+        if 14 * 60 + 20 <= t <= 14 * 60 + 50:
+            slot = t // 5
+            if slot != last_closing_slot:
+                last_closing_slot = slot
+                _check_closing_bet_entry()
+
+        # ── 14:50~15:00 KST - 장중매매 강제 청산 (종가베팅 제외) ────────────
         if 14 * 60 + 50 <= t <= 15 * 60 and _last_ran.get("force_close") != today:
             _last_ran["force_close"] = today
             run_force_close()
