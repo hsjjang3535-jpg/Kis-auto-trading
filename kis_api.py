@@ -327,3 +327,38 @@ def get_holdings() -> list[dict]:
     )
     res.raise_for_status()
     return res.json().get("output1", [])
+
+
+def get_cash_balance() -> int:
+    """실제 계좌 예수금(주문가능금액) 조회"""
+    acc_no = ACCOUNT_NO[:8]
+    acc_prod = ACCOUNT_NO[8:] if len(ACCOUNT_NO) > 8 else "01"
+    tr_id = "TTTC8434R" if MODE == "실전" else "VTTC8434R"
+
+    res = requests.get(
+        f"{TRADE_URL}/uapi/domestic-stock/v1/trading/inquire-balance",
+        headers=_trade_headers(tr_id),
+        timeout=10,
+        params={
+            "CANO": acc_no,
+            "ACNT_PRDT_CD": acc_prod,
+            "AFHR_FLPR_YN": "N",
+            "OFL_YN": "",
+            "INQR_DVSN": "02",
+            "UNPR_DVSN": "01",
+            "FUND_STTL_ICLD_YN": "N",
+            "FNCG_AMT_AUTO_RDPT_YN": "N",
+            "PRCS_DVSN": "01",
+            "CTX_AREA_FK100": "",
+            "CTX_AREA_NK100": "",
+        },
+    )
+    res.raise_for_status()
+    data = res.json()
+    # output2: 계좌 요약 정보 (예수금, 총평가금액 등)
+    summary = data.get("output2", [{}])
+    if isinstance(summary, list):
+        summary = summary[0] if summary else {}
+    # dnca_tot_amt: 예수금 총액 / prvs_rcdl_excc_amt: 전일 매매 청산 금액
+    cash = int(summary.get("dnca_tot_amt", "0") or "0")
+    return cash

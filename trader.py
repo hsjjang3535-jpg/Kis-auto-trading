@@ -30,8 +30,11 @@ MAX_TOTAL_AMOUNT = int(os.getenv("MAX_TOTAL_AMOUNT", "1000000"))
 SELL_BLACKLIST = [s.strip() for s in os.getenv("SELL_BLACKLIST", "").split(",") if s.strip()]
 STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "2.0"))
 TAKE_PROFIT_PCT = float(os.getenv("TAKE_PROFIT_PCT", "3.0"))
-# 트레일링 스탑: 3% 이상 수익 후 고점에서 이만큼 내리면 매도
 TRAILING_STOP_PCT = float(os.getenv("TRAILING_STOP_PCT", "1.0"))
+# 동적 자금 관리: True면 매일 실제 예수금으로 한도 자동 조절
+DYNAMIC_CAPITAL = os.getenv("DYNAMIC_CAPITAL", "true").lower() == "true"
+# 1회 매수금액 = 예수금의 이 비율 (기본 50%)
+BUY_RATIO = float(os.getenv("BUY_RATIO", "0.5"))
 
 _STATE_FILE = "trading_state.json"
 
@@ -129,13 +132,41 @@ def is_exit_time() -> bool:
 
 # ── 스케줄 함수 ───────────────────────────────────────────────────────────────
 
+def _update_capital() -> None:
+    """실제 예수금으로 MAX_TOTAL_AMOUNT, MAX_BUY_AMOUNT 자동 조절"""
+    global MAX_TOTAL_AMOUNT, MAX_BUY_AMOUNT
+    if not DYNAMIC_CAPITAL:
+        return
+    try:
+        cash = kis_api.get_cash_balance()
+        if cash <= 0:
+            print("[자금관리] 예수금 조회 실패 또는 0원 - 기존 한도 유지")
+            return
+        # 예수금 전액을 총 한도로 설정 (단, 환경변수 최솟값 이상 유지)
+        old_total = MAX_TOTAL_AMOUNT
+        old_buy   = MAX_BUY_AMOUNT
+        MAX_TOTAL_AMOUNT = cash
+        MAX_BUY_AMOUNT   = int(cash * BUY_RATIO)
+        print(f"[자금관리] 예수금 {cash:,}원 → 총한도 {MAX_TOTAL_AMOUNT:,}원 / 1회매수 {MAX_BUY_AMOUNT:,}원")
+        if old_total != MAX_TOTAL_AMOUNT:
+            notifier.send(
+                f"💰 <b>자금 한도 자동 조절</b>\n"
+                f"예수금: {cash:,}원\n"
+                f"총 투자 한도: {old_total:,}원 → {MAX_TOTAL_AMOUNT:,}원\n"
+                f"1회 매수 한도: {old_buy:,}원 → {MAX_BUY_AMOUNT:,}원 (예수금의 {int(BUY_RATIO*100)}%)"
+            )
+    except Exception as e:
+        print(f"[자금관리] 예수금 조회 오류: {e}")
+
+
 def run_morning_screening() -> None:
-    """09:00 - 워치리스트 구성"""
+    """09:05 - 워치리스트 구성"""
     if not is_trading_day():
         return
 
     global _watchlist
     print(f"\n[{datetime.now(KST).strftime('%H:%M:%S')} KST] 오전 스크리닝 시작")
+    _update_capital()  # 실제 예수금으로 투자 한도 자동 조절
     notifier.send("⏰ 오전 9시 05분 - 장 시작 후 워치리스트 구성 시작")
 
     try:
