@@ -242,32 +242,45 @@ def run_closing_report() -> None:
         return
 
     print(f"\n[{datetime.now(KST).strftime('%H:%M:%S')} KST] 장마감 손익 보고")
+    today = datetime.now(KST).strftime("%Y-%m-%d")
 
     if not _trades_today:
-        notifier.send("📋 <b>오늘 장마감 보고</b>\n매매 없음 (체결 종목 없음)")
+        notifier.send(
+            f"📋 <b>오늘 장마감 보고 ({today})</b>\n"
+            "매매 없음 (체결 종목 없음)"
+        )
         return
 
-    total_profit_won = sum(t["profit_won"] for t in _trades_today)
-    win_trades = [t for t in _trades_today if t["profit_won"] > 0]
+    win_trades  = [t for t in _trades_today if t["profit_won"] > 0]
     lose_trades = [t for t in _trades_today if t["profit_won"] <= 0]
+    total_profit = sum(t["profit_won"] for t in win_trades)
+    total_loss   = sum(t["profit_won"] for t in lose_trades)
+    net = total_profit + total_loss
 
-    lines = ["📋 <b>오늘 장마감 손익 보고</b>\n"]
+    lines = [f"📋 <b>오늘 장마감 보고 ({today})</b>\n"]
 
     for t in _trades_today:
-        emoji = "📈" if t["profit_won"] > 0 else "📉"
-        sign = "+" if t["profit_won"] > 0 else ""
+        is_profit = t["profit_won"] > 0
+        emoji = "📈" if is_profit else "📉"
+        sign  = "+" if is_profit else ""
+
         lines.append(
-            f"{emoji} {t['name']}({t['code']})\n"
-            f"   매수 {t['buy_price']:,}원 → 매도 {t['sell_price']:,}원\n"
-            f"   {t['quantity']}주 | {sign}{t['profit_pct']}% | {sign}{t['profit_won']:,}원\n"
-            f"   사유: {t['reason']}"
+            f"{emoji} <b>{t['name']} ({t['code']})</b>\n"
+            f"   전략: {t.get('strategy', '-')}\n"
+            f"   매수가: {t['buy_price']:,}원 | 수량: {t['quantity']}주\n"
+            f"   매도가: {t['sell_price']:,}원\n"
+            f"   매수사유: {t.get('buy_reason', '-')}\n"
+            f"   결과: {sign}{t['profit_pct']}% ({sign}{t['profit_won']:,}원)\n"
+            f"   매도사유: {t.get('sell_reason', '-')}"
         )
 
     lines.append("")
-    lines.append(f"─────────────────")
-    lines.append(f"총 매매: {len(_trades_today)}건 (익절 {len(win_trades)}건 / 손절 {len(lose_trades)}건)")
-    sign = "+" if total_profit_won > 0 else ""
-    lines.append(f"오늘 손익: <b>{sign}{total_profit_won:,}원</b>")
+    lines.append("─────────────────────")
+    lines.append(f"총 매매: {len(_trades_today)}건")
+    lines.append(f"  익절 {len(win_trades)}건: +{total_profit:,}원")
+    lines.append(f"  손절 {len(lose_trades)}건: {total_loss:,}원")
+    net_sign = "+" if net >= 0 else ""
+    lines.append(f"\n🏁 오늘 순손익: <b>{net_sign}{net:,}원</b>")
 
     notifier.send("\n".join(lines))
 
@@ -364,6 +377,7 @@ def _check_entry() -> None:
                     "buy_price": int(current),
                     "peak_price": int(current),  # 트레일링 스탑용 고점 추적
                     "strategy": strategy,
+                    "buy_reason": stock.get("reason", ""),  # AI 매수사유
                 }
                 _save_state()
                 already_held.add(code)
@@ -449,7 +463,9 @@ def _execute_sell(code: str, pos: dict, reason: str,
                 "sell_price": int(current),
                 "profit_pct": round(profit_pct, 2),
                 "profit_won": profit_won,
-                "reason": reason,
+                "sell_reason": reason,
+                "buy_reason": pos.get("buy_reason", ""),
+                "strategy": pos.get("strategy", ""),
             })
             del _positions[code]
             _save_state()
