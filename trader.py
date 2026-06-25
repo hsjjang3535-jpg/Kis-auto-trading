@@ -30,6 +30,8 @@ MAX_TOTAL_AMOUNT = int(os.getenv("MAX_TOTAL_AMOUNT", "1000000"))
 SELL_BLACKLIST = [s.strip() for s in os.getenv("SELL_BLACKLIST", "").split(",") if s.strip()]
 STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "2.0"))
 TAKE_PROFIT_PCT = float(os.getenv("TAKE_PROFIT_PCT", "3.0"))
+# 트레일링 스탑: 3% 이상 수익 후 고점에서 이만큼 내리면 매도
+TRAILING_STOP_PCT = float(os.getenv("TRAILING_STOP_PCT", "1.0"))
 
 _STATE_FILE = "trading_state.json"
 
@@ -360,6 +362,7 @@ def _check_entry() -> None:
                     "name": name,
                     "quantity": quantity,
                     "buy_price": int(current),
+                    "peak_price": int(current),  # 트레일링 스탑용 고점 추적
                     "strategy": strategy,
                 }
                 _save_state()
@@ -382,7 +385,7 @@ def _check_entry() -> None:
 # ── 청산 로직 ─────────────────────────────────────────────────────────────────
 
 def _check_exit() -> None:
-    """보유 포지션 익절/손절 조건 체크"""
+    """보유 포지션 익절(트레일링 스탑)/손절 조건 체크"""
     if not _positions:
         return
 
@@ -395,10 +398,27 @@ def _check_exit() -> None:
             current = float(info.get("stck_prpr", pos["buy_price"]))
             profit_pct = (current - pos["buy_price"]) / pos["buy_price"] * 100
 
-            if profit_pct >= TAKE_PROFIT_PCT:
-                _execute_sell(code, pos, f"익절 (+{profit_pct:.1f}%)", current, profit_pct)
-            elif profit_pct <= -STOP_LOSS_PCT:
+            # 고점 갱신 (트레일링 스탑용)
+            peak = pos.get("peak_price", pos["buy_price"])
+            if current > peak:
+                peak = current
+                _positions[code]["peak_price"] = peak
+                _save_state()
+
+            peak_profit_pct = (peak - pos["buy_price"]) / pos["buy_price"] * 100
+            drop_from_peak = (peak - current) / peak * 100
+
+            if profit_pct <= -STOP_LOSS_PCT:
+                # 손절: -2% 이하
                 _execute_sell(code, pos, f"손절 ({profit_pct:.1f}%)", current, profit_pct)
+
+            elif peak_profit_pct >= TAKE_PROFIT_PCT and drop_from_peak >= TRAILING_STOP_PCT:
+                # 트레일링 스탑: 3% 이상 도달 후 고점에서 1% 이상 내려오면 매도
+                _execute_sell(
+                    code, pos,
+                    f"트레일링 익절 (현재 +{profit_pct:.1f}% / 고점 +{peak_profit_pct:.1f}%에서 -{drop_from_peak:.1f}%)",
+                    current, profit_pct,
+                )
 
             time.sleep(0.3)
 
