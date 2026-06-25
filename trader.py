@@ -134,7 +134,7 @@ def run_morning_screening() -> None:
 
     global _watchlist
     print(f"\n[{datetime.now(KST).strftime('%H:%M:%S')} KST] 오전 스크리닝 시작")
-    notifier.send("⏰ 오전 8시 50분 - 장 시작 전 워치리스트 구성 시작")
+    notifier.send("⏰ 오전 9시 05분 - 장 시작 후 워치리스트 구성 시작")
 
     try:
         candidates = screener.screen_candidates(top_n=30)
@@ -494,8 +494,8 @@ def main():
             last_5min_slot = -1
         _last_ran["date"] = today
 
-        # ── 09:05 KST - 워치리스트 스크리닝 (장 개시 후 데이터 안정화) ──────
-        if t >= 9 * 60 + 5 and _last_ran.get("screening") != today:
+        # ── 09:05~09:30 KST - 워치리스트 스크리닝 (장 개시 후 데이터 안정화) ──
+        if 9 * 60 + 5 <= t <= 9 * 60 + 30 and _last_ran.get("screening") != today:
             _last_ran["screening"] = today
             run_morning_screening()
 
