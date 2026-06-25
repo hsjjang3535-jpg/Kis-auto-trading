@@ -11,18 +11,11 @@
 import os
 import json
 import time
-import schedule
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
-# Railway 서버는 UTC 기준이므로 Python C라이브러리에도 KST 명시 적용
-os.environ.setdefault("TZ", "Asia/Seoul")
-try:
-    time.tzset()  # Linux/Railway 전용: C time library에도 TZ 반영
-except AttributeError:
-    pass  # Windows는 tzset 없으므로 무시
-
+# schedule 라이브러리 사용 안 함 - KST 직접 체크 루프로 대체
 KST = ZoneInfo("Asia/Seoul")
 
 import kis_api
@@ -449,35 +442,77 @@ def _execute_sell(code: str, pos: dict, reason: str,
         notifier.notify_error(f"{name} 매도 오류: {e}")
 
 
+# ── 일별 실행 추적 (오늘 날짜별로 각 작업이 한 번씩만 실행되도록) ────────────────
+_last_ran: dict[str, str] = {}
+
+
+def _reset_daily_state() -> None:
+    """자정이 지나 날짜가 바뀌면 일별 데이터 초기화"""
+    global _watchlist, _trades_today, _total_invested_today
+    _watchlist = []
+    _trades_today = []
+    _total_invested_today = 0
+    _save_state()
+    print(f"[일별 초기화] {_today_kst()} 새 거래일 시작")
+
+
 # ── 메인 ──────────────────────────────────────────────────────────────────────
 
 def main():
     print("=== KIS 자동매매 시작 (종산 장중매매) ===")
     _load_state()
+
+    now_kst = datetime.now(KST).strftime("%Y-%m-%d %H:%M KST")
     notifier.send(
-        "🤖 자동매매 봇 시작 (장중매매)\n"
+        f"🤖 자동매매 봇 시작 (장중매매) - {now_kst}\n"
         "08:50 워치리스트 → 09:10~14:30 5분마다 진입\n"
         "익절 +3% / 손절 -2% / 14:50 강제청산 / 15:10 손익보고"
     )
 
-    # 한국시간(KST) 기준 스케줄
-    schedule.every().day.at("08:50").do(run_morning_screening)  # 장 시작 10분 전 (전날 데이터 기준)
-    schedule.every(5).minutes.do(run_market_check)
-    schedule.every().day.at("11:00").do(run_status_report)
-    schedule.every().day.at("14:50").do(run_force_close)
-    schedule.every().day.at("15:10").do(run_closing_report)
+    print("KST 직접 체크 루프 시작 (schedule 라이브러리 미사용)")
+    print(f"현재 KST: {datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')}")
 
-    print("스케줄 등록 완료 (한국시간 KST):")
-    print("  08:50       - 워치리스트 스크리닝 (장 시작 전)")
-    print("  09:10~14:30 - 5분마다 진입 체크")
-    print("  09:10~14:45 - 5분마다 청산 체크 (익절/손절)")
-    print("  11:00       - 상태 보고")
-    print("  14:50       - 강제 청산")
-    print("  15:10       - 장마감 손익 보고")
+    last_5min_slot = -1  # 마지막으로 장중 체크한 5분 슬롯
 
     while True:
-        schedule.run_pending()
-        time.sleep(10)
+        now = datetime.now(KST)
+        today = now.strftime("%Y-%m-%d")
+        t = now.hour * 60 + now.minute  # 자정 기준 분 단위 (예: 09:10 → 550)
+
+        # 날짜가 바뀌면 일별 상태 초기화
+        if _last_ran.get("date") and _last_ran["date"] != today:
+            _reset_daily_state()
+            last_5min_slot = -1
+        _last_ran["date"] = today
+
+        # ── 08:50 KST - 워치리스트 스크리닝 ──────────────────────────────────
+        if t >= 8 * 60 + 50 and _last_ran.get("screening") != today:
+            _last_ran["screening"] = today
+            run_morning_screening()
+
+        # ── 09:10~14:45 KST - 5분마다 장중 진입/청산 체크 ───────────────────
+        if 9 * 60 + 10 <= t <= 14 * 60 + 45:
+            slot = t // 5  # 5분 단위 슬롯 번호 (분이 바뀌기 전까지 같은 값)
+            if slot != last_5min_slot:
+                last_5min_slot = slot
+                run_market_check()
+
+        # ── 11:00 KST - 상태 보고 ────────────────────────────────────────────
+        if t >= 11 * 60 and _last_ran.get("status") != today:
+            _last_ran["status"] = today
+            run_status_report()
+
+        # ── 14:50 KST - 강제 청산 ────────────────────────────────────────────
+        if t >= 14 * 60 + 50 and _last_ran.get("force_close") != today:
+            _last_ran["force_close"] = today
+            run_force_close()
+
+        # ── 15:10 KST - 장마감 손익 보고 ─────────────────────────────────────
+        if t >= 15 * 60 + 10 and _last_ran.get("closing") != today:
+            _last_ran["closing"] = today
+            run_closing_report()
+
+        time.sleep(20)  # 20초마다 KST 시간 직접 체크
 
 
 if __name__ == "__main__":

@@ -38,7 +38,20 @@ def _get_trading_value_won(stock: dict) -> int:
 def screen_candidates(top_n: int = 30) -> list[dict]:
     """상단매매 + 하단매매 + 돌파매매 후보 통합 스크리닝"""
     print(f"[스크리너] 거래대금 상위 {top_n}개 종목 조회 중...")
-    top_stocks = kis_api.get_top_trading_value(top_n)
+
+    # API 일시 오류 시 최대 3회 재시도
+    top_stocks = []
+    for attempt in range(3):
+        try:
+            top_stocks = kis_api.get_top_trading_value(top_n)
+            if top_stocks:
+                break
+        except Exception as e:
+            print(f"  ⚠️ 거래대금 조회 실패 ({attempt+1}/3): {e}")
+            if attempt < 2:
+                time.sleep(10)
+    if not top_stocks:
+        raise RuntimeError("거래대금 상위 종목 조회 3회 모두 실패")
 
     upper_candidates = []
     lower_candidates = []
