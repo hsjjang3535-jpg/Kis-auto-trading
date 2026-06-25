@@ -73,10 +73,20 @@ def do_screening():
     """수동 스크리닝 실행"""
     _check_auth()
     import trader
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    now = datetime.now(ZoneInfo("Asia/Seoul"))
+    t_min = now.hour * 60 + now.minute
+
     if not trader.is_trading_day():
-        return jsonify({"ok": False, "message": "오늘은 거래일이 아닙니다"})
-    t = threading.Thread(target=trader.run_morning_screening, daemon=True)
-    t.start()
+        return jsonify({"ok": False, "message": "오늘은 거래일(주말/공휴일)이 아닙니다"})
+    if not (9 * 60 <= t_min <= 15 * 60 + 30):
+        return jsonify({
+            "ok": False,
+            "message": f"장 운영 시간이 아닙니다 (현재 KST {now.strftime('%H:%M')})\n스크리닝은 09:00~15:30 사이에 사용하세요."
+        })
+    th = threading.Thread(target=trader.run_morning_screening, daemon=True)
+    th.start()
     return jsonify({"ok": True, "message": "스크리닝 시작됨"})
 
 
