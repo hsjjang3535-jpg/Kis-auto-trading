@@ -401,10 +401,16 @@ def run_closing_report() -> None:
     today = datetime.now(KST).strftime("%Y-%m-%d")
 
     if not _trades_today:
-        notifier.send(
-            f"📋 <b>오늘 장마감 보고 ({today})</b>\n"
-            "매매 없음 (체결 종목 없음)"
-        )
+        # 워치리스트가 있었는지, 이유는 무엇인지 함께 보고
+        lines = [f"📋 <b>오늘 장마감 보고 ({today})</b>", "매매 없음 (체결 종목 없음)\n"]
+        if not _watchlist:
+            lines.append("📭 워치리스트 0개 - 오늘 스크리닝 조건 충족 종목 없음")
+        else:
+            lines.append(f"📋 워치리스트 {len(_watchlist)}개 있었으나 실시간 진입조건 미충족:")
+            for s in _watchlist[:5]:
+                skip = s.get("_skip_reason", "진입조건 미충족")
+                lines.append(f"  ❌ {s['name']}({s.get('strategy','')}): {skip}")
+        notifier.send("\n".join(lines))
         return
 
     win_trades  = [t for t in _trades_today if t["profit_won"] > 0]
@@ -454,6 +460,15 @@ def run_closing_report() -> None:
         lines.append(f"\n🌙 종가베팅 오버나이트 {len(_closing_positions)}개 보유 (내일 09:00 시초가 매도)")
         for code, pos in _closing_positions.items():
             lines.append(f"   {pos['name']}({code}) {pos['buy_price']:,}원 {pos['quantity']}주")
+
+    # 워치리스트에 있었지만 미진입 종목
+    traded_codes = {t["code"] for t in _trades_today}
+    missed = [s for s in _watchlist if s["code"] not in traded_codes]
+    if missed:
+        lines.append("\n📋 워치리스트 미진입 종목:")
+        for s in missed[:3]:
+            skip = s.get("_skip_reason", "진입조건 미충족")
+            lines.append(f"  ❌ {s['name']}({s.get('strategy','')}): {skip}")
 
     lines.append("")
     lines.append("─────────────────────")
