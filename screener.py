@@ -13,8 +13,8 @@
   - 최소 가격 1,000원 이상
 
 기술 조건 (종산 매매법):
-  - 상단매매: 5일선 위, 200일 신고가 98%, 거래량 200%↑, 윗꼬리 30%↓
-  - 하단매매: 20일선 아래, 5일선 위, RSI≤30, 거래량 150%↑, 52주고가 20%이내
+  - 상단매매: 5일선 위, 52주 신고가 5% 이내(신고가 권역), 거래량 200%↑, 윗꼬리 30%↓
+  - 하단매매: 20일선 아래, 5일선 위, RSI≤40, 거래량 150%↑, 52주고가 20%이내
   - 돌파매매: 20일 최고가 돌파, 5일선 위, 거래량 200%↑, 윗꼬리 30%↓
 
 최종 15개 선정 (상단 > 돌파 > 하단 순)
@@ -183,12 +183,13 @@ def _apply_technical_filter(stocks: list[dict]) -> tuple[list, list, list]:
         upper_tail = ind["upper_tail_ratio"]
         rsi        = ind.get("rsi", 50.0)
 
-        # 52주 신고가
+        # 52주 신고가 (상단매매 기준으로 사용)
         try:
             info = kis_api.get_stock_info(code)
             w52_high = float(info.get("w52_hgpr", 0))
             w52_gap  = (w52_high - current) / w52_high * 100 if w52_high > 0 else 100
         except Exception:
+            w52_high = 0
             w52_gap = 100
 
         base = {
@@ -197,20 +198,23 @@ def _apply_technical_filter(stocks: list[dict]) -> tuple[list, list, list]:
             "change_rate": rate, "current": current,
             "ma5": ma5, "ma20": ma20,
             "high_200": high_200, "high_20": high_20,
+            "w52_high": w52_high, "w52_gap": w52_gap,  # 종산 상단매매 기준
             "vol_ratio": vol_ratio, "upper_tail": upper_tail,
             "rsi": rsi,
             "source": stock.get("_theme", "거래대금"),
         }
 
+        # 종산 상단매매: 52주 신고가 5% 이내 (신고가 권역) + 5일선 위 + 거래량 2배 + 윗꼬리 작음
         upper_ok = (
             current >= ma5 and
-            current >= high_200 * 0.98 and
+            w52_gap <= 5 and        # 52주 신고가 5% 이내 (종산 기법)
             vol_ratio >= 2.0 and
             upper_tail <= 0.3
         )
+        # 종산 하단매매: RSI 40 이하로 완화 (원본 기준)
         lower_ok = (
             current < ma20 and current >= ma5 and
-            w52_gap <= 20 and vol_ratio >= 1.5 and rsi <= 30
+            w52_gap <= 20 and vol_ratio >= 1.5 and rsi <= 40
         )
         breakout_ok = (
             high_20 > 0 and current >= high_20 * 0.995 and
@@ -220,7 +224,7 @@ def _apply_technical_filter(stocks: list[dict]) -> tuple[list, list, list]:
 
         if upper_ok:
             upper.append({**base, "strategy": "상단매매"})
-            print(f"  🔴 상단: {name}({code}) {rate:+.1f}% 거래량{vol_ratio:.1f}x [{base['source']}]")
+            print(f"  🔴 상단: {name}({code}) {rate:+.1f}% 52주신고가{w52_gap:.1f}%내 거래량{vol_ratio:.1f}x [{base['source']}]")
         elif breakout_ok:
             breakout.append({**base, "strategy": "돌파매매"})
             print(f"  🟡 돌파: {name}({code}) {rate:+.1f}% 20일고가돌파 [{base['source']}]")

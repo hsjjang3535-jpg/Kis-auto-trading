@@ -637,13 +637,19 @@ def _check_entry() -> None:
             high_20 = stock.get("high_20", 0)
             rsi = stock.get("rsi", 50.0)
 
+            # 스크리닝 때 저장된 52주 신고가 (상단매매 기준)
+            w52_high = stock.get("w52_high", 0)
+
             entry_ok = False
             skip_reason = ""
             if strategy == "상단매매":
                 if current < ma5:
                     skip_reason = f"MA5 하회 ({current:,.0f} < {ma5:,.0f})"
-                elif high_200 <= 0 or current < high_200 * 0.98:
-                    skip_reason = f"200일고가 미달 ({current:,.0f} < {high_200*0.98:,.0f})"
+                elif w52_high <= 0:
+                    skip_reason = "52주 신고가 정보 없음"
+                elif (w52_high - current) / w52_high * 100 > 5:
+                    gap = (w52_high - current) / w52_high * 100
+                    skip_reason = f"52주신고가 권역 이탈 ({gap:.1f}% 하락, 5% 초과)"
                 else:
                     entry_ok = True
             elif strategy == "하단매매":
@@ -651,8 +657,8 @@ def _check_entry() -> None:
                     skip_reason = f"MA5 하회 ({current:,.0f} < {ma5:,.0f})"
                 elif ma20 <= 0 or current >= ma20:
                     skip_reason = f"MA20 위 (눌림목 아님, {current:,.0f} >= {ma20:,.0f})"
-                elif rsi > 30:
-                    skip_reason = f"RSI 과매도 아님 ({rsi:.0f} > 30)"
+                elif rsi > 40:
+                    skip_reason = f"RSI 과매도 아님 ({rsi:.0f} > 40)"
                 else:
                     entry_ok = True
             elif strategy == "돌파매매":
