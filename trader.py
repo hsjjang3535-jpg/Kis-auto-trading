@@ -358,6 +358,16 @@ def run_status_report() -> None:
             except Exception:
                 closing_lines.append(f"  🌙{pos['name']}: 조회 실패")
 
+        # 워치리스트 종목 중 진입 미충족 종목 정리
+        waiting_lines = []
+        for s in _watchlist:
+            code = s["code"]
+            if code not in _positions:
+                skip = s.get("_skip_reason", "조건 대기 중")
+                waiting_lines.append(
+                    f"  ⏳{s['name']}({s.get('strategy','')}): {skip}"
+                )
+
         lines = [
             "📊 <b>오전 11시 상태 보고</b>",
             f"모드: {os.getenv('KIS_MODE', '알 수 없음')}",
@@ -372,6 +382,9 @@ def run_status_report() -> None:
         if closing_lines:
             lines.append("🌙 종가베팅 보유 종목:")
             lines.extend(closing_lines)
+        if waiting_lines:
+            lines.append("⏳ 진입 대기 중 (조건 미충족):")
+            lines.extend(waiting_lines[:5])  # 최대 5개만 표시
 
         notifier.send("\n".join(lines))
 
@@ -610,24 +623,35 @@ def _check_entry() -> None:
             rsi = stock.get("rsi", 50.0)
 
             entry_ok = False
+            skip_reason = ""
             if strategy == "상단매매":
-                entry_ok = (
-                    current >= ma5 and
-                    high_200 > 0 and current >= high_200 * 0.98
-                )
+                if current < ma5:
+                    skip_reason = f"MA5 하회 ({current:,.0f} < {ma5:,.0f})"
+                elif high_200 <= 0 or current < high_200 * 0.98:
+                    skip_reason = f"200일고가 미달 ({current:,.0f} < {high_200*0.98:,.0f})"
+                else:
+                    entry_ok = True
             elif strategy == "하단매매":
-                entry_ok = (
-                    current >= ma5 and
-                    ma20 > 0 and current < ma20 and
-                    rsi <= 30  # screener와 동일 기준
-                )
+                if current < ma5:
+                    skip_reason = f"MA5 하회 ({current:,.0f} < {ma5:,.0f})"
+                elif ma20 <= 0 or current >= ma20:
+                    skip_reason = f"MA20 위 (눌림목 아님, {current:,.0f} >= {ma20:,.0f})"
+                elif rsi > 30:
+                    skip_reason = f"RSI 과매도 아님 ({rsi:.0f} > 30)"
+                else:
+                    entry_ok = True
             elif strategy == "돌파매매":
-                entry_ok = (
-                    high_20 > 0 and current >= high_20 * 0.995 and
-                    current >= ma5
-                )
+                if high_20 <= 0 or current < high_20 * 0.995:
+                    skip_reason = f"20일고가 미돌파 ({current:,.0f} < {high_20*0.995:,.0f})"
+                elif current < ma5:
+                    skip_reason = f"MA5 하회 ({current:,.0f} < {ma5:,.0f})"
+                else:
+                    entry_ok = True
 
             if not entry_ok:
+                print(f"[진입 미충족] {name}({strategy}): {skip_reason}")
+                # 워치리스트 종목에 skip_reason 기록 (상태 보고용)
+                stock["_skip_reason"] = skip_reason
                 continue
 
             # 매수 실행
