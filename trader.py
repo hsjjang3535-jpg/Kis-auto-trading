@@ -253,10 +253,10 @@ def run_closing_bet_screening() -> None:
         notifier.notify_error(msg)
 
 
-def run_morning_screening() -> None:
-    """09:05 - 워치리스트 구성"""
+def run_morning_screening() -> bool:
+    """09:05 - 워치리스트 구성. 성공 True / 실패 False"""
     if not is_trading_day():
-        return
+        return False
 
     global _watchlist
     print(f"\n[{datetime.now(KST).strftime('%H:%M:%S')} KST] 오전 스크리닝 시작")
@@ -307,11 +307,13 @@ def run_morning_screening() -> None:
             notifier.send("🔍 오늘 워치리스트 없음 - 진입 대기")
 
         print(f"[스크리닝 완료] 워치리스트 {len(approved)}개")
+        return True
 
     except Exception as e:
         msg = f"오전 스크리닝 오류: {e}"
         print(msg)
         notifier.notify_error(msg)
+        return False
 
 
 def run_market_check() -> None:
@@ -850,11 +852,12 @@ def main():
         # 09:05~09:30 재시작: 장중매매 스크리닝 즉시 실행
         if 9 * 60 + 5 <= _init_min <= 9 * 60 + 30 and not _watchlist:
             notifier.send("▶️ 봇 재시작 감지 (스크리닝 시간) - 즉시 스크리닝 실행")
-            _last_ran["screening"] = _init_today
-            run_morning_screening()
+            if run_morning_screening():
+                _last_ran["screening_ok"] = _init_today
 
     last_5min_slot = -1       # 장중매매 5분 슬롯
     last_closing_slot = -1    # 종가베팅 5분 슬롯
+    last_screening_slot = -1  # 스크리닝 5분 재시도 슬롯
 
     while True:
         now = datetime.now(KST)
@@ -866,6 +869,7 @@ def main():
             _reset_daily_state()
             last_5min_slot = -1
             last_closing_slot = -1
+            last_screening_slot = -1
         _last_ran["date"] = today
 
         # ── 09:00~09:10 KST - 종가베팅 시초가 매도 ──────────────────────────
@@ -873,10 +877,13 @@ def main():
             _last_ran["closing_sell"] = today
             run_morning_sell_closing_bet()
 
-        # ── 09:05~09:30 KST - 장중매매 워치리스트 스크리닝 ──────────────────
-        if 9 * 60 + 5 <= t <= 9 * 60 + 30 and _last_ran.get("screening") != today:
-            _last_ran["screening"] = today
-            run_morning_screening()
+        # ── 09:05~09:30 KST - 장중매매 워치리스트 스크리닝 (실패 시 5분마다 재시도) ──
+        if 9 * 60 + 5 <= t <= 9 * 60 + 30 and _last_ran.get("screening_ok") != today:
+            slot = t // 5
+            if slot != last_screening_slot:
+                last_screening_slot = slot
+                if run_morning_screening():
+                    _last_ran["screening_ok"] = today
 
         # ── 09:10~14:45 KST - 5분마다 장중 진입/청산 체크 ───────────────────
         if 9 * 60 + 10 <= t <= 14 * 60 + 45:

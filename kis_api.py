@@ -80,32 +80,39 @@ def _trade_headers(tr_id: str) -> dict:
 
 
 def get_top_trading_value(top_n: int = 20, market: str = "0000") -> list[dict]:
-    """거래대금 상위 종목 조회
+    """거래대금 상위 종목 조회 (거래량순위 API, fid_blng_cls_code=3)
     market: "0000"=전체, "0001"=코스피, "1001"=코스닥
     """
+    headers = _market_headers("FHPST01710000")
+    headers["custtype"] = "P"
+
     res = requests.get(
-        f"{MARKET_URL}/uapi/domestic-stock/v1/ranking/trading-value",
-        headers=_market_headers("FHPST01700000"),
+        f"{MARKET_URL}/uapi/domestic-stock/v1/quotations/volume-rank",
+        headers=headers,
         timeout=10,
         params={
-            "fid_cond_mrkt_div_code": "J",
-            "fid_cond_scr_div_code": "20171",
-            "fid_input_iscd": market,
-            "fid_rank_sort_cls_code": "0",
-            "fid_input_cnt_1": str(top_n),
-            "fid_prc_cls_code": "0",
-            "fid_input_price_1": "",
-            "fid_input_price_2": "",
-            "fid_vol_cnt": "",
-            "fid_trgt_cls_code": "111111111",
-            "fid_trgt_exls_cls_code": "000000",
-            "fid_div_cls_code": "0",
-            "fid_rsfl_rate1": "",
-            "fid_rsfl_rate2": "",
+            "FID_COND_MRKT_DIV_CODE": "J",
+            "FID_COND_SCR_DIV_CODE": "20171",
+            "FID_INPUT_ISCD": market,
+            "FID_DIV_CLS_CODE": "0",
+            "FID_BLNG_CLS_CODE": "3",       # 3=거래금액순
+            "FID_TRGT_CLS_CODE": "111111111",
+            "FID_TRGT_EXLS_CLS_CODE": "000000",
+            "FID_INPUT_PRICE_1": "0",
+            "FID_INPUT_PRICE_2": "0",
+            "FID_VOL_CNT": "0",
+            "FID_INPUT_DATE_1": "0",
         },
     )
     res.raise_for_status()
-    return res.json().get("output", [])
+    data = res.json()
+    if data.get("rt_cd") != "0":
+        msg = data.get("msg1", "알 수 없는 오류")
+        raise RuntimeError(f"거래대금 API 오류 (market={market}): {msg}")
+
+    # volume-rank API는 Output(대문자) 또는 output(소문자) 사용
+    items = data.get("output") or data.get("Output") or []
+    return items[:top_n]
 
 
 def get_stock_info(stock_code: str) -> dict:

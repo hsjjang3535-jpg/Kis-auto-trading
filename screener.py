@@ -86,20 +86,24 @@ def _get_trading_value(stock: dict) -> int:
         return 0
 
 
-def _fetch_market_stocks(market: str, label: str, top_n: int = 30) -> list[dict]:
-    """코스피 또는 코스닥 거래대금 상위 종목 조회 (재시도 포함)"""
+def _fetch_market_stocks(market: str, label: str, top_n: int = 30) -> tuple[list[dict], str]:
+    """코스피 또는 코스닥 거래대금 상위 종목 조회 (재시도 포함)
+    Returns: (종목 리스트, 마지막 오류 메시지)
+    """
+    last_err = ""
     for attempt in range(3):
         try:
             stocks = kis_api.get_top_trading_value(top_n, market=market)
             if stocks:
                 print(f"  [{label}] {len(stocks)}개 조회 완료")
-                return stocks
+                return stocks, ""
         except Exception as e:
+            last_err = str(e)
             print(f"  [{label}] 조회 실패 ({attempt+1}/3): {e}")
             if attempt < 2:
                 time.sleep(10)
     print(f"  [{label}] 3회 모두 실패")
-    return []
+    return [], last_err
 
 
 def _fetch_theme_stocks() -> list[dict]:
@@ -247,9 +251,9 @@ def screen_closing_bet_candidates(top_n: int = 20) -> list[dict]:
     """
     print("\n[종가베팅 스크리너] 후보 선정 시작")
 
-    kospi  = _fetch_market_stocks("0001", "코스피(종가)", top_n)
+    kospi, _  = _fetch_market_stocks("0001", "코스피(종가)", top_n)
     time.sleep(0.5)
-    kosdaq = _fetch_market_stocks("1001", "코스닥(종가)", top_n)
+    kosdaq, _ = _fetch_market_stocks("1001", "코스닥(종가)", top_n)
 
     all_stocks: list[dict] = []
     seen: set[str] = set()
@@ -319,10 +323,19 @@ def screen_candidates(top_n: int = 30) -> list[dict]:
     print(f"\n[스크리너] 동적 종목 선정 시작")
 
     # 1. 코스피 + 코스닥 + 테마주 수집
-    kospi  = _fetch_market_stocks("0001", "코스피", top_n)
+    kospi, kospi_err  = _fetch_market_stocks("0001", "코스피", top_n)
     time.sleep(0.5)
-    kosdaq = _fetch_market_stocks("1001", "코스닥", top_n)
+    kosdaq, kosdaq_err = _fetch_market_stocks("1001", "코스닥", top_n)
     time.sleep(0.5)
+
+    # 코스피/코스닥 개별 조회 실패 시 전체 시장으로 1회 fallback
+    if not kospi and not kosdaq:
+        print("  [fallback] 코스피+코스닥 실패 → 전체 시장(0000) 재시도")
+        all_market, all_err = _fetch_market_stocks("0000", "전체", top_n * 2)
+        if all_market:
+            kospi = all_market  # 전체 결과를 후보 풀로 사용
+            kospi_err = ""
+
     theme  = _fetch_theme_stocks()
 
     # 중복 제거 후 통합 (코스피 → 코스닥 → 테마 순)
@@ -337,7 +350,8 @@ def screen_candidates(top_n: int = 30) -> list[dict]:
     print(f"[스크리너] 총 {len(all_stocks)}개 후보 (코스피{len(kospi)} + 코스닥{len(kosdaq)} + 테마{len(theme)})")
 
     if not all_stocks:
-        raise RuntimeError("종목 조회 실패 - 모든 소스에서 빈 결과")
+        detail = f"코스피:{kospi_err or '빈결과'} / 코스닥:{kosdaq_err or '빈결과'} / 테마:{len(theme)}개"
+        raise RuntimeError(f"종목 조회 실패 - 모든 소스에서 빈 결과 ({detail})")
 
     # 2. 기술적 조건 필터링
     upper, breakout, lower = _apply_technical_filter(all_stocks)
