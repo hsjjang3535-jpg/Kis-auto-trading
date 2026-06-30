@@ -75,6 +75,10 @@ _closing_invested_today: int = 0
 # { name, code, quantity, buy_price, sell_price, profit_pct, profit_won, reason, strategy }
 _trades_today: list[dict] = []
 
+# 오늘 스크리닝 요약 (0개일 때 이유 보고용)
+_last_morning_summary: dict = {}
+_last_closing_summary: dict = {}
+
 
 # ── 상태 저장/복원 ─────────────────────────────────────────────────────────────
 
@@ -158,6 +162,50 @@ def is_exit_time() -> bool:
 
 # ── 스케줄 함수 ───────────────────────────────────────────────────────────────
 
+def _format_empty_watchlist_msg(kind: str = "장중") -> str:
+    """워치리스트 0개일 때 상세 이유 메시지"""
+    if kind == "장중":
+        stats = screener.get_last_screen_stats()
+        summary = _last_morning_summary
+        header = "🔍 <b>오늘 장중 워치리스트 없음</b>\n"
+    else:
+        stats = screener.get_last_closing_stats()
+        summary = _last_closing_summary
+        header = "🌙 <b>종가베팅 워치리스트 없음</b>\n"
+
+    lines = [header]
+    pool = stats.get("pool", 0)
+    tech = stats.get("technical_pass", 0)
+
+    if pool == 0:
+        lines.append("📭 종목 조회 실패 또는 후보 풀 0개")
+        return "\n".join(lines)
+
+    if kind == "장중":
+        lines.append(
+            f"📊 후보 {pool}개 수집 (코스피{stats.get('kospi',0)}+"
+            f"코스닥{stats.get('kosdaq',0)}+테마{stats.get('theme',0)})"
+        )
+        lines.append(
+            f"   기술조건: 상단 {stats.get('upper',0)} / "
+            f"돌파 {stats.get('breakout',0)} / 하단 {stats.get('lower',0)} "
+            f"→ 통과 {tech}개"
+        )
+    else:
+        lines.append(f"📊 후보 {pool}개 → 종가베팅 조건 통과 {tech}개")
+
+    if tech == 0:
+        lines.append("❌ 원인: 종산 기술조건(거래량·신고가·RSI 등) 충족 종목 없음")
+    elif summary.get("ai_rejected"):
+        lines.append(f"❌ 원인: AI 매수 거절 {len(summary['ai_rejected'])}개")
+        for r in summary["ai_rejected"][:3]:
+            lines.append(f"   · {r['name']}: {r['reason']}")
+    else:
+        lines.append("❌ 원인: 조건 통과 후보 없음")
+
+    return "\n".join(lines)
+
+
 def _update_capital() -> None:
     """실제 예수금으로 MAX_TOTAL_AMOUNT, MAX_BUY_AMOUNT 자동 조절"""
     global MAX_TOTAL_AMOUNT, MAX_BUY_AMOUNT
@@ -206,7 +254,7 @@ def run_closing_bet_screening() -> None:
     if not is_trading_day():
         return
 
-    global _closing_watchlist
+    global _closing_watchlist, _last_closing_summary
     print(f"\n[{datetime.now(KST).strftime('%H:%M:%S')} KST] 종가베팅 스크리닝 시작")
     notifier.send("⏰ 오후 2시 - 종가베팅 후보 스크리닝 시작")
 
@@ -214,6 +262,7 @@ def run_closing_bet_screening() -> None:
         candidates = screener.screen_closing_bet_candidates(top_n=20)
 
         approved = []
+        ai_rejected = []
         ai_fail_count = 0
         for c in candidates:
             result = ai_analyzer.analyze_closing_bet(c["name"], c["code"], c["change_rate"])
@@ -224,13 +273,24 @@ def run_closing_bet_screening() -> None:
                 ai_fail_count += 1
             if result["buy"]:
                 approved.append(c)
+            else:
+                ai_rejected.append({
+                    "name": c["name"], "reason": result["reason"],
+                })
             time.sleep(2)
 
         if candidates and ai_fail_count == len(candidates):
             approved = candidates
+            ai_rejected = []
             for c in approved:
                 c.setdefault("reason", "AI 분석 불가 (기술적 조건 통과)")
 
+        _last_closing_summary = {
+            "stats": screener.get_last_closing_stats(),
+            "candidates": len(candidates),
+            "approved": len(approved),
+            "ai_rejected": ai_rejected,
+        }
         _closing_watchlist = approved
 
         if approved:
@@ -243,7 +303,7 @@ def run_closing_bet_screening() -> None:
                 )
             notifier.send("\n".join(lines))
         else:
-            notifier.send("🌙 종가베팅 워치리스트 없음 - 매수 없음")
+            notifier.send(_format_empty_watchlist_msg("종가"))
 
         print(f"[종가베팅 스크리닝 완료] {len(approved)}개")
 
@@ -258,15 +318,17 @@ def run_morning_screening() -> bool:
     if not is_trading_day():
         return False
 
-    global _watchlist
+    global _watchlist, _last_morning_summary
     print(f"\n[{datetime.now(KST).strftime('%H:%M:%S')} KST] 오전 스크리닝 시작")
     _update_capital()  # 실제 예수금으로 투자 한도 자동 조절
     notifier.send("⏰ 오전 9시 05분 - 장 시작 후 워치리스트 구성 시작")
 
     try:
         candidates = screener.screen_candidates(top_n=30)
+        stats = screener.get_last_screen_stats()
 
         approved = []
+        ai_rejected = []
         ai_fail_count = 0
         for c in candidates:
             result = ai_analyzer.analyze(c["name"], c["code"], c["change_rate"])
@@ -277,6 +339,12 @@ def run_morning_screening() -> bool:
                 ai_fail_count += 1
             if result["buy"]:
                 approved.append(c)
+            else:
+                ai_rejected.append({
+                    "name": c["name"], "code": c["code"],
+                    "strategy": c.get("strategy", ""),
+                    "reason": result["reason"],
+                })
             time.sleep(2)  # Groq API 속도 제한 방지 (분당 30회)
 
         # AI가 전부 실패한 경우 → 기술적 조건 통과 종목만으로 진행
@@ -287,9 +355,16 @@ def run_morning_screening() -> bool:
                 "Groq API 전체 다운 → 기술적 조건 통과 종목으로 진행합니다."
             )
             approved = candidates
+            ai_rejected = []
             for c in approved:
                 c.setdefault("reason", "AI 분석 불가 (기술적 조건 통과)")
 
+        _last_morning_summary = {
+            "stats": stats,
+            "candidates": len(candidates),
+            "approved": len(approved),
+            "ai_rejected": ai_rejected,
+        }
         _watchlist = approved
 
         if approved:
@@ -304,7 +379,7 @@ def run_morning_screening() -> bool:
                 )
             notifier.send("\n".join(lines))
         else:
-            notifier.send("🔍 오늘 워치리스트 없음 - 진입 대기")
+            notifier.send(_format_empty_watchlist_msg("장중"))
 
         print(f"[스크리닝 완료] 워치리스트 {len(approved)}개")
         return True
@@ -403,10 +478,22 @@ def run_closing_report() -> None:
     today = datetime.now(KST).strftime("%Y-%m-%d")
 
     if not _trades_today:
-        # 워치리스트가 있었는지, 이유는 무엇인지 함께 보고
         lines = [f"📋 <b>오늘 장마감 보고 ({today})</b>", "매매 없음 (체결 종목 없음)\n"]
         if not _watchlist:
-            lines.append("📭 워치리스트 0개 - 오늘 스크리닝 조건 충족 종목 없음")
+            summary = _last_morning_summary
+            stats = summary.get("stats") or screener.get_last_screen_stats()
+            if stats.get("pool", 0) > 0:
+                lines.append(
+                    f"📊 장중 스크리닝: 후보 {stats.get('pool',0)}개 → "
+                    f"기술조건 {stats.get('technical_pass',0)}개 → "
+                    f"워치리스트 {summary.get('approved', 0)}개"
+                )
+                if stats.get("technical_pass", 0) == 0:
+                    lines.append("   ❌ 종산 기술조건(거래량·신고가·RSI) 충족 종목 없음")
+                elif summary.get("ai_rejected"):
+                    lines.append(f"   ❌ AI 매수 거절 {len(summary['ai_rejected'])}개")
+            else:
+                lines.append("📭 워치리스트 0개 - 스크리닝 조건 충족 종목 없음")
         else:
             lines.append(f"📋 워치리스트 {len(_watchlist)}개 있었으나 실시간 진입조건 미충족:")
             for s in _watchlist[:5]:

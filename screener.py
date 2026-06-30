@@ -27,6 +27,18 @@ MIN_TRADING_VALUE = 10_000_000_000   # 100억
 MIN_PRICE = 1_000                    # 최소 주가 1,000원
 MAX_FINAL = int(os.getenv("MAX_WATCHLIST", "15"))   # 최종 워치리스트 수
 
+# 마지막 스크리닝 통계 (텔레그램 보고용)
+_last_screen_stats: dict = {}
+_last_closing_stats: dict = {}
+
+
+def get_last_screen_stats() -> dict:
+    return _last_screen_stats.copy()
+
+
+def get_last_closing_stats() -> dict:
+    return _last_closing_stats.copy()
+
 # ETF 이름 필터 (포함 시 제외)
 _ETF_KEYWORDS = [
     "KODEX", "TIGER", "KBSTAR", "HANARO", "ARIRANG", "KOSEF",
@@ -314,6 +326,14 @@ def screen_closing_bet_candidates(top_n: int = 20) -> list[dict]:
 
     candidates.sort(key=lambda x: x["change_rate"], reverse=True)
     result = candidates[:5]
+
+    global _last_closing_stats
+    _last_closing_stats = {
+        "pool": len(all_stocks),
+        "technical_pass": len(candidates),
+        "final": len(result),
+    }
+
     print(f"\n[종가베팅 스크리너 완료] 최종 {len(result)}개 선정")
     return result
 
@@ -359,6 +379,19 @@ def screen_candidates(top_n: int = 30) -> list[dict]:
     # 3. 우선순위 정렬 후 최종 MAX_FINAL개 선정
     combined = upper + breakout + lower
     final = combined[:MAX_FINAL]
+
+    global _last_screen_stats
+    _last_screen_stats = {
+        "pool": len(all_stocks),
+        "kospi": len(kospi),
+        "kosdaq": len(kosdaq),
+        "theme": len(theme),
+        "upper": len(upper),
+        "breakout": len(breakout),
+        "lower": len(lower),
+        "technical_pass": len(combined),
+        "final": len(final),
+    }
 
     print(
         f"\n[스크리너 완료] 상단 {len(upper)}개 / 돌파 {len(breakout)}개 / 하단 {len(lower)}개 "
