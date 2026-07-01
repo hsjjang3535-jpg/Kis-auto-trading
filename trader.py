@@ -265,13 +265,17 @@ def run_closing_bet_screening() -> None:
         ai_rejected = []
         ai_fail_count = 0
         for c in candidates:
-            result = ai_analyzer.analyze_closing_bet(c["name"], c["code"], c["change_rate"])
-            c["buy"] = result["buy"]
+            result = ai_analyzer.analyze_closing_bet(
+                c["name"], c["code"], c["change_rate"],
+                rsi=c.get("rsi"), vol_ratio=c.get("vol_ratio"),
+                current=c.get("current"), ma5=c.get("ma5"),
+            )
+            c["buy"] = ai_analyzer.is_approved(result)
             c["strength"] = result["strength"]
             c["reason"] = result["reason"]
             if result["reason"] == "분석 실패":
                 ai_fail_count += 1
-            if result["buy"]:
+            if c["buy"]:
                 approved.append(c)
             else:
                 ai_rejected.append({
@@ -331,13 +335,19 @@ def run_morning_screening() -> bool:
         ai_rejected = []
         ai_fail_count = 0
         for c in candidates:
-            result = ai_analyzer.analyze(c["name"], c["code"], c["change_rate"])
-            c["buy"] = result["buy"]
+            result = ai_analyzer.analyze(
+                c["name"], c["code"], c["change_rate"],
+                strategy=c.get("strategy", ""),
+                rsi=c.get("rsi"), vol_ratio=c.get("vol_ratio"),
+                current=c.get("current"), ma5=c.get("ma5"),
+                w52_gap=c.get("w52_gap"),
+            )
+            c["buy"] = ai_analyzer.is_approved(result)
             c["strength"] = result["strength"]
             c["reason"] = result["reason"]
             if result["reason"] == "분석 실패":
                 ai_fail_count += 1
-            if result["buy"]:
+            if c["buy"]:
                 approved.append(c)
             else:
                 ai_rejected.append({
