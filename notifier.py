@@ -51,7 +51,7 @@ def notify_screening_result(candidates: list) -> None:
         return
     lines = ["🔍 <b>오늘 종가베팅 AI 선정 종목</b>\n"]
     for c in candidates:
-        strategy_map = {"상단매매": "🔴", "돌파매매": "🟡", "하단매매": "🔵"}
+        strategy_map = {"상단매매": "🔴", "돌파매매": "🟡", "하단매매": "🔵", "낙폭반등": "🔶"}
         strategy_emoji = strategy_map.get(c.get("strategy", ""), "⚪")
         lines.append(
             f"{strategy_emoji} [{c.get('strategy', '')}] {c['name']}({c['code']}) {c['change_rate']:+.1f}%\n"

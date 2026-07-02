@@ -190,6 +190,147 @@ def get_daily_chart(stock_code: str, days: int = 200) -> list[dict]:
     )
     return data.get("output2", [])
 
+def get_minute_chart(stock_code: str, hour: str | None = None) -> list[dict]:
+    """당일 1분봉 조회 (기준 시각 이전 최대 30개)"""
+    if not hour:
+        hour = datetime.now(KST).strftime("%H%M%S")
+    data = _market_get(
+        "/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice",
+        "FHKST03010200",
+        {
+            "fid_cond_mrkt_div_code": "J",
+            "fid_input_iscd": stock_code,
+            "fid_input_hour_1": hour,
+            "fid_pw_data_incu_yn": "Y",
+            "fid_fake_tick_incu_yn": "N",
+            "fid_adj_stck_prc": "1",
+        },
+    )
+    return data.get("output2", [])
+
+
+def _hour_before(hhmmss: int) -> str:
+    """HHMMSS 정수에서 1분 전 시각 문자열"""
+    h = hhmmss // 10000
+    m = (hhmmss // 100) % 100
+    s = hhmmss % 100
+    total = h * 3600 + m * 60 + s - 60
+    if total < 9 * 3600:
+        return "090000"
+    nh, rem = divmod(total, 3600)
+    nm, ns = divmod(rem, 60)
+    return f"{nh:02d}{nm:02d}{ns:02d}"
+
+
+def get_intraday_minute_bars(stock_code: str, max_minutes: int = 90) -> list[dict]:
+    """당일 1분봉 수집 (과거→현재 순)"""
+    all_candles: list[dict] = []
+    seen: set[str] = set()
+    hour = datetime.now(KST).strftime("%H%M%S")
+
+    for _ in range(4):
+        chunk = get_minute_chart(stock_code, hour)
+        if not chunk:
+            break
+        for c in chunk:
+            key = c.get("stck_cntg_hour", "")
+            if key and key not in seen:
+                seen.add(key)
+                all_candles.append(c)
+        if len(all_candles) >= max_minutes:
+            break
+        times = []
+        for c in chunk:
+            try:
+                times.append(int(c.get("stck_cntg_hour", "0")))
+            except ValueError:
+                continue
+        if not times:
+            break
+        hour = _hour_before(min(times))
+
+    all_candles.sort(key=lambda x: x.get("stck_cntg_hour", ""))
+    return all_candles[-max_minutes:]
+
+
+def aggregate_5min_bars(minute_candles: list[dict]) -> list[dict]:
+    """1분봉 → 5분봉 OHLCV"""
+    if not minute_candles:
+        return []
+
+    parsed = []
+    for c in minute_candles:
+        try:
+            t = int(c.get("stck_cntg_hour", "0"))
+            parsed.append({
+                "time": t,
+                "open": float(c.get("stck_oprc", 0)),
+                "high": float(c.get("stck_hgpr", 0)),
+                "low": float(c.get("stck_lwpr", 0)),
+                "close": float(c.get("stck_prpr", 0)),
+                "volume": float(c.get("cntg_vol", 0)),
+            })
+        except (ValueError, TypeError):
+            continue
+
+    if not parsed:
+        return []
+
+    bars: list[dict] = []
+    bucket: list[dict] = []
+    bucket_start: int | None = None
+
+    for row in parsed:
+        minute_of_day = (row["time"] // 10000) * 60 + ((row["time"] // 100) % 100)
+        slot = minute_of_day // 5
+        if bucket_start is None:
+            bucket_start = slot
+        if slot != bucket_start and bucket:
+            bars.append(_merge_ohlcv(bucket))
+            bucket = []
+            bucket_start = slot
+        bucket.append(row)
+
+    if bucket:
+        bars.append(_merge_ohlcv(bucket))
+    return bars
+
+
+def _merge_ohlcv(rows: list[dict]) -> dict:
+    return {
+        "open": rows[0]["open"],
+        "high": max(r["high"] for r in rows),
+        "low": min(r["low"] for r in rows),
+        "close": rows[-1]["close"],
+        "volume": sum(r["volume"] for r in rows),
+    }
+
+
+def get_intraday_5min_indicators(stock_code: str) -> dict:
+    """5분봉 기반 단기 지표 (MA60·RSI·세션 저점)"""
+    minutes = get_intraday_minute_bars(stock_code, max_minutes=90)
+    bars = aggregate_5min_bars(minutes)
+    if not bars:
+        return {}
+
+    closes = [b["close"] for b in bars]
+    lows = [b["low"] for b in bars]
+    period = min(60, len(closes))
+    ma60 = sum(closes[-period:]) / period
+    rsi = _calc_rsi(closes, min(14, len(closes) - 1) if len(closes) > 1 else 14)
+    session_low = min(lows)
+
+    return {
+        "current": closes[-1],
+        "ma60": ma60,
+        "ma_period": period,
+        "rsi": rsi,
+        "session_low": session_low,
+        "bars_5": bars,
+        "bar_count": len(bars),
+    }
+
+
 def get_chart_indicators(stock_code: str) -> dict:
     """
     차트 지표 계산:
