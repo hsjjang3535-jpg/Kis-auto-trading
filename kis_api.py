@@ -1,4 +1,5 @@
 import os
+import time
 import requests
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -68,6 +69,38 @@ def _market_headers(tr_id: str) -> dict:
     }
 
 
+def _market_get(path: str, tr_id: str, params: dict, retries: int = 3) -> dict:
+    """시세 API GET (500 등 일시 오류 시 재시도)"""
+    last_err: Exception | None = None
+    for attempt in range(retries):
+        try:
+            res = requests.get(
+                f"{MARKET_URL}{path}",
+                headers=_market_headers(tr_id),
+                params=params,
+                timeout=10,
+            )
+            if res.status_code in (500, 502, 503, 504):
+                raise requests.HTTPError(
+                    f"{res.status_code} Server Error: {res.reason} for url: {res.url}",
+                    response=res,
+                )
+            res.raise_for_status()
+            data = res.json()
+            if data.get("rt_cd") not in (None, "0"):
+                msg = data.get("msg1", "알 수 없는 오류")
+                raise RuntimeError(f"KIS 시세 API 오류 ({tr_id}): {msg}")
+            return data
+        except Exception as e:
+            last_err = e
+            if attempt < retries - 1:
+                wait = 1 + attempt
+                print(f"[KIS 재시도] {path} ({attempt + 1}/{retries}) {e} → {wait}초 후")
+                time.sleep(wait)
+                continue
+            break
+    raise last_err or RuntimeError(f"KIS API 호출 실패: {path}")
+
 def _trade_headers(tr_id: str) -> dict:
     """주문/계좌 조회용 헤더 (모드별 토큰)"""
     return {
@@ -117,25 +150,36 @@ def get_top_trading_value(top_n: int = 20, market: str = "0000") -> list[dict]:
 
 def get_stock_info(stock_code: str) -> dict:
     """주식 현재가 및 기본 정보 조회"""
-    res = requests.get(
-        f"{MARKET_URL}/uapi/domestic-stock/v1/quotations/inquire-price",
-        headers=_market_headers("FHKST01010100"),
-        params={"fid_cond_mrkt_div_code": "J", "fid_input_iscd": stock_code},
-        timeout=10,
+    data = _market_get(
+        "/uapi/domestic-stock/v1/quotations/inquire-price",
+        "FHKST01010100",
+        {"fid_cond_mrkt_div_code": "J", "fid_input_iscd": stock_code},
     )
-    res.raise_for_status()
-    return res.json().get("output", {})
+    return data.get("output", {})
 
+
+def get_current_price(stock_code: str, fallback: float | None = None) -> float:
+    """현재가 조회 (실패 시 fallback 사용)"""
+    try:
+        info = get_stock_info(stock_code)
+        price = float(info.get("stck_prpr", 0))
+        if price > 0:
+            return price
+    except Exception as e:
+        print(f"[현재가 조회 실패] {stock_code}: {e}")
+    if fallback and float(fallback) > 0:
+        print(f"[현재가 fallback] {stock_code}: 스크리닝 가격 {fallback:.0f}원 사용")
+        return float(fallback)
+    raise RuntimeError(f"현재가 조회 실패 ({stock_code})")
 
 def get_daily_chart(stock_code: str, days: int = 200) -> list[dict]:
     """일봉 데이터 조회 (최근 days일)"""
     today = datetime.now(KST).strftime("%Y%m%d")
     start = (datetime.now(KST) - timedelta(days=days + 50)).strftime("%Y%m%d")
-    res = requests.get(
-        f"{MARKET_URL}/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice",
-        headers=_market_headers("FHKST03010100"),
-        timeout=15,
-        params={
+    data = _market_get(
+        "/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice",
+        "FHKST03010100",
+        {
             "fid_cond_mrkt_div_code": "J",
             "fid_input_iscd": stock_code,
             "fid_input_date_1": start,
@@ -144,9 +188,7 @@ def get_daily_chart(stock_code: str, days: int = 200) -> list[dict]:
             "fid_org_adj_prc": "0",
         },
     )
-    res.raise_for_status()
-    return res.json().get("output2", [])
-
+    return data.get("output2", [])
 
 def get_chart_indicators(stock_code: str) -> dict:
     """

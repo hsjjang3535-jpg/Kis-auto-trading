@@ -625,8 +625,7 @@ def _check_closing_bet_entry() -> None:
             continue
 
         try:
-            info = kis_api.get_stock_info(code)
-            current = float(info.get("stck_prpr", 0))
+            current = kis_api.get_current_price(code, fallback=stock.get("current"))
             if current == 0:
                 continue
 
@@ -724,8 +723,7 @@ def _check_entry() -> None:
             continue
 
         try:
-            info = kis_api.get_stock_info(code)
-            current = float(info.get("stck_prpr", 0))
+            current = kis_api.get_current_price(code, fallback=stock.get("current"))
             if current == 0:
                 continue
 
