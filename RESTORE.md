@@ -18,7 +18,8 @@ cp .env.example .env
 # .env 파일을 편집해 실제 키 입력
 ```
 
-Railway: **Dashboard → Variables**에 `.env.example` 항목 설정.
+Railway: **Dashboard → Variables**에 `.env.example` 항목 설정.  
+**체크리스트:** [RAILWAY_VARIABLES.md](./RAILWAY_VARIABLES.md)
 
 ### Railway 권장 Variables (자동매매)
 
