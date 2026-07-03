@@ -837,9 +837,9 @@ def _check_entry() -> None:
                     skip_reason = f"MA5 하회 ({current:,.0f} < {ma5:,.0f})"
                 elif w52_high <= 0:
                     skip_reason = "52주 신고가 정보 없음"
-                elif (w52_high - current) / w52_high * 100 > 5:
+                elif (w52_high - current) / w52_high * 100 > screener.W52_GAP_UPPER_MAX:
                     gap = (w52_high - current) / w52_high * 100
-                    skip_reason = f"52주신고가 권역 이탈 ({gap:.1f}% 하락, 5% 초과)"
+                    skip_reason = f"52주신고가 권역 이탈 ({gap:.1f}% 하락, {screener.W52_GAP_UPPER_MAX:g}% 초과)"
                 else:
                     entry_ok = True
             elif strategy == "하단매매":
@@ -847,8 +847,8 @@ def _check_entry() -> None:
                     skip_reason = f"MA5 하회 ({current:,.0f} < {ma5:,.0f})"
                 elif ma20 <= 0 or current >= ma20:
                     skip_reason = f"MA20 위 (눌림목 아님, {current:,.0f} >= {ma20:,.0f})"
-                elif rsi > 40:
-                    skip_reason = f"RSI 과매도 아님 ({rsi:.0f} > 40)"
+                elif rsi > screener.LOWER_RSI_MAX:
+                    skip_reason = f"RSI 과매도 아님 ({rsi:.0f} > {screener.LOWER_RSI_MAX:g})"
                 else:
                     entry_ok = True
             elif strategy == "돌파매매":

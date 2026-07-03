@@ -9,13 +9,13 @@
 필터:
   - ETF 제외
   - 거래대금 100억 이상
-  - 하락 종목 제외
+  - 하락 종목 제외 (-2% 미만만 제외, -2%~ 허용)
   - 최소 가격 1,000원 이상
 
-기술 조건 (종산 매매법):
-  - 상단매매: 5일선 위, 52주 신고가 5% 이내(신고가 권역), 거래량 200%↑, 윗꼬리 30%↓
-  - 하단매매: 20일선 아래, 5일선 위, RSI≤40, 거래량 150%↑, 52주고가 20%이내
-  - 돌파매매: 20일 최고가 돌파, 5일선 위, 거래량 200%↑, 윗꼬리 30%↓
+기술 조건 (종산 매매법, 1순위 완화):
+  - 상단매매: 5일선 위, 52주 신고가 7% 이내, 거래량 150%↑, 윗꼬리 30%↓
+  - 하단매매: 20일선 아래, 5일선 위, RSI≤45, 거래량 150%↑, 52주고가 20%이내
+  - 돌파매매: 20일 최고가 돌파, 5일선 위, 거래량 150%↑, 윗꼬리 30%↓
 
 최종 15개 선정 (상단 > 돌파 > 하단 순)
 """
@@ -26,6 +26,13 @@ import kis_api
 MIN_TRADING_VALUE = 10_000_000_000   # 100억
 MIN_PRICE = 1_000                    # 최소 주가 1,000원
 MAX_FINAL = int(os.getenv("MAX_WATCHLIST", "15"))   # 최종 워치리스트 수
+
+# 1순위 완화 (환경변수로 조정 가능)
+MIN_CHANGE_RATE = float(os.getenv("MIN_CHANGE_RATE", "-2.0"))   # -2%까지 허용
+VOL_RATIO_MIN = float(os.getenv("VOL_RATIO_MIN", "1.5"))        # 상단/돌파/종가
+W52_GAP_UPPER_MAX = float(os.getenv("W52_GAP_UPPER_MAX", "7.0"))  # 상단 52주 신고가 %
+CLOSING_BET_MIN_RATE = float(os.getenv("CLOSING_BET_MIN_RATE", "1.5"))  # 종가베팅 당일 상승 %
+LOWER_RSI_MAX = float(os.getenv("LOWER_RSI_MAX", "45"))  # 하단매매 RSI 상한
 
 # 마지막 스크리닝 통계 (텔레그램 보고용)
 _last_screen_stats: dict = {}
@@ -173,7 +180,7 @@ def _apply_technical_filter(stocks: list[dict]) -> tuple[list, list, list]:
         except ValueError:
             rate = 0.0
 
-        if rate < 0:
+        if rate < MIN_CHANGE_RATE:
             continue
 
         # 차트 지표 조회
@@ -220,21 +227,21 @@ def _apply_technical_filter(stocks: list[dict]) -> tuple[list, list, list]:
             "source": stock.get("_theme", "거래대금"),
         }
 
-        # 종산 상단매매: 52주 신고가 5% 이내 (신고가 권역) + 5일선 위 + 거래량 2배 + 윗꼬리 작음
+        # 종산 상단매매: 52주 신고가 W52_GAP_UPPER_MAX% 이내 + 5일선 위 + 거래량 + 윗꼬리 작음
         upper_ok = (
             current >= ma5 and
-            w52_gap <= 5 and        # 52주 신고가 5% 이내 (종산 기법)
-            vol_ratio >= 2.0 and
+            w52_gap <= W52_GAP_UPPER_MAX and
+            vol_ratio >= VOL_RATIO_MIN and
             upper_tail <= 0.3
         )
-        # 종산 하단매매: RSI 40 이하로 완화 (원본 기준)
+        # 종산 하단매매
         lower_ok = (
             current < ma20 and current >= ma5 and
-            w52_gap <= 20 and vol_ratio >= 1.5 and rsi <= 40
+            w52_gap <= 20 and vol_ratio >= 1.5 and rsi <= LOWER_RSI_MAX
         )
         breakout_ok = (
             high_20 > 0 and current >= high_20 * 0.995 and
-            current >= ma5 and vol_ratio >= 2.0 and
+            current >= ma5 and vol_ratio >= VOL_RATIO_MIN and
             upper_tail <= 0.3 and not upper_ok
         )
 
@@ -255,9 +262,9 @@ def screen_closing_bet_candidates(top_n: int = 20) -> list[dict]:
     """종가베팅 후보 선정 (14:00 스크리닝)
 
     조건:
-    - 당일 상승률 2% 이상
+    - 당일 상승률 1.5% 이상
     - 5일선 위 (상승 추세)
-    - 거래량 2배 이상 (모멘텀 확인)
+    - 거래량 1.5배 이상 (모멘텀 확인)
     - RSI 40~75 (적정 모멘텀, 과열 아님)
     - 최대 5개 선정
     """
@@ -290,7 +297,7 @@ def screen_closing_bet_candidates(top_n: int = 20) -> list[dict]:
         except ValueError:
             rate = 0.0
 
-        if rate < 2.0:  # 당일 2% 이상 상승만
+        if rate < CLOSING_BET_MIN_RATE:
             continue
 
         try:
@@ -311,7 +318,7 @@ def screen_closing_bet_candidates(top_n: int = 20) -> list[dict]:
         vol_ratio = ind["vol_ratio"]
         rsi = ind.get("rsi", 50.0)
 
-        if current >= ma5 and vol_ratio >= 2.0 and 40 <= rsi <= 75:
+        if current >= ma5 and vol_ratio >= VOL_RATIO_MIN and 40 <= rsi <= 75:
             candidates.append({
                 "code": code,
                 "name": name,
