@@ -6,6 +6,7 @@
   09:05 - 장중매매 워치리스트 스크리닝
   09:10 ~ 14:45 - 5분마다 장중매매 진입/청산 체크
   09:10 ~ 10:30 - 5분마다 낙폭반등 체크 (ENABLE_CRASH_BOUNCE=true 시)
+  09:15 ~ 10:30 - 5분마다 V자반등 체크 (ENABLE_V_REVERSAL=true 시)
   11:00 - 상태 보고
   14:00 - 종가베팅 스크리닝
   14:20 ~ 14:50 - 5분마다 종가베팅 매수 체크
@@ -27,6 +28,7 @@ import screener
 import ai_analyzer
 import notifier
 import crash_bounce
+import v_reversal
 
 load_dotenv()
 
@@ -67,6 +69,9 @@ _total_invested_today: int = 0
 # 오늘 낙폭반등 투자금 (전용 한도)
 _crash_bounce_invested_today: int = 0
 
+# 오늘 V자반등 투자금 (전용 한도)
+_v_reversal_invested_today: int = 0
+
 # 종가베팅 워치리스트 (14:00 스크리닝)
 _closing_watchlist: list[dict] = []
 
@@ -97,6 +102,7 @@ def _save_state() -> None:
         "positions": _positions,
         "total_invested_today": _total_invested_today,
         "crash_bounce_invested_today": _crash_bounce_invested_today,
+        "v_reversal_invested_today": _v_reversal_invested_today,
         "trades_today": _trades_today,
         "closing_positions": _closing_positions,       # 오버나이트 유지
         "closing_invested_today": _closing_invested_today,
@@ -111,6 +117,7 @@ def _save_state() -> None:
 def _load_state() -> None:
     global _positions, _total_invested_today, _trades_today
     global _closing_positions, _closing_invested_today, _crash_bounce_invested_today
+    global _v_reversal_invested_today
     if not os.path.exists(_STATE_FILE):
         return
     try:
@@ -127,6 +134,7 @@ def _load_state() -> None:
             _positions = state.get("positions", {})
             _total_invested_today = state.get("total_invested_today", 0)
             _crash_bounce_invested_today = state.get("crash_bounce_invested_today", 0)
+            _v_reversal_invested_today = state.get("v_reversal_invested_today", 0)
             _trades_today = state.get("trades_today", [])
             _closing_invested_today = state.get("closing_invested_today", 0)
             if _positions:
@@ -387,7 +395,7 @@ def run_morning_screening() -> bool:
         if approved:
             ai_note = " (AI 미적용)" if ai_unavailable else ""
             lines = [f"🔍 <b>장중매매 워치리스트 {len(approved)}개{ai_note}</b>\n"]
-            strategy_map = {"상단매매": "🔴", "돌파매매": "🟡", "하단매매": "🔵", "낙폭반등": "🔶"}
+            strategy_map = {"상단매매": "🔴", "돌파매매": "🟡", "하단매매": "🔵", "낙폭반등": "🔶", "V자반등": "🟢"}
             for c in approved:
                 emoji = strategy_map.get(c.get("strategy", ""), "⚪")
                 lines.append(
@@ -418,6 +426,9 @@ def run_market_check() -> None:
 
     if crash_bounce.is_entry_window():
         _check_crash_bounce_entry()
+
+    if v_reversal.is_entry_window():
+        _check_v_reversal_entry()
 
     if is_entry_time():
         _check_entry()
@@ -472,6 +483,8 @@ def run_status_report() -> None:
             f"장중 투자금: {_total_invested_today:,}원 / {MAX_TOTAL_AMOUNT:,}원",
             f"낙폭반등: {sum(1 for p in _positions.values() if p.get('strategy') == '낙폭반등')}개 / "
             f"{_crash_bounce_invested_today:,}원 / {crash_bounce.MAX_AMOUNT:,}원",
+            f"V자반등: {sum(1 for p in _positions.values() if p.get('strategy') == 'V자반등')}개 / "
+            f"{_v_reversal_invested_today:,}원 / {v_reversal.MAX_AMOUNT:,}원",
             f"종가베팅 - 워치리스트: {len(_closing_watchlist)}개 / 보유: {len(_closing_positions)}개",
             f"종가베팅 투자금: {_closing_invested_today:,}원 / {MAX_CLOSING_AMOUNT:,}원",
         ]
@@ -793,6 +806,87 @@ def _check_crash_bounce_entry() -> None:
             notifier.notify_error(f"{name} 낙폭반등 진입 오류: {e}")
 
 
+# ── V자반등 진입 로직 ──────────────────────────────────────────────────────────
+
+def _v_reversal_position_count() -> int:
+    return sum(1 for p in _positions.values() if p.get("strategy") == v_reversal.STRATEGY)
+
+
+def _check_v_reversal_entry() -> None:
+    """V자반등 매수 (09:15~10:30, ENABLE_V_REVERSAL=true)"""
+    if not v_reversal.is_enabled() or not v_reversal.is_entry_window():
+        return
+
+    global _v_reversal_invested_today
+
+    if _v_reversal_position_count() >= v_reversal.MAX_POSITIONS:
+        return
+
+    remaining = v_reversal.MAX_AMOUNT - _v_reversal_invested_today
+    if remaining <= 0:
+        return
+
+    already_held = set(_positions.keys())
+
+    try:
+        candidates, api_used = v_reversal.scan_candidates()
+        print(f"[V자반등] 스캔 {len(candidates)}개 후보 (API {api_used}회)")
+    except Exception as e:
+        notifier.notify_error(f"V자반등 스캔 오류: {e}")
+        return
+
+    for stock in candidates:
+        code = stock["code"]
+        name = stock["name"]
+
+        if code in already_held:
+            continue
+
+        try:
+            current = kis_api.get_current_price(code, fallback=stock.get("current"))
+            if current == 0:
+                continue
+
+            buy_amount = min(v_reversal.MAX_BUY, remaining)
+            quantity = buy_amount // int(current)
+            if quantity < 1:
+                continue
+
+            result = kis_api.buy_stock(code, quantity)
+            if result.get("rt_cd") == "0":
+                invested = quantity * int(current)
+                _v_reversal_invested_today += invested
+                _positions[code] = {
+                    "name": name,
+                    "quantity": quantity,
+                    "buy_price": int(current),
+                    "peak_price": int(current),
+                    "strategy": v_reversal.STRATEGY,
+                    "buy_reason": stock.get("reason", ""),
+                    "exit_ma60": stock.get("ma60", 0),
+                    "ma_period": stock.get("ma_period", 60),
+                }
+                _save_state()
+                already_held.add(code)
+                remaining = v_reversal.MAX_AMOUNT - _v_reversal_invested_today
+                notifier.notify_buy(
+                    name, code, quantity, int(current),
+                    f"[V자반등] {stock.get('reason', '')}",
+                )
+                print(f"[V자반등] 매수 {name}({code}) {quantity}주 @ {int(current):,}")
+
+                if remaining <= 0 or _v_reversal_position_count() >= v_reversal.MAX_POSITIONS:
+                    break
+            else:
+                msg = result.get("msg1", "알 수 없는 오류")
+                notifier.notify_error(f"{name} V자반등 매수 실패: {msg}")
+
+            time.sleep(0.5)
+
+        except Exception as e:
+            notifier.notify_error(f"{name} V자반등 진입 오류: {e}")
+
+
 # ── 장중매매 진입 로직 ─────────────────────────────────────────────────────────
 
 def _check_entry() -> None:
@@ -932,6 +1026,26 @@ def _check_exit() -> None:
                     _execute_sell(code, pos, reason, current, profit_pct)
                 continue
 
+            # V자반등: 트레일링·MA·14:20 시간청산
+            if strategy == v_reversal.STRATEGY:
+                peak = pos.get("peak_price", pos["buy_price"])
+                if current > peak:
+                    _positions[code]["peak_price"] = int(current)
+                    _save_state()
+                    peak = current
+
+                intra = None
+                try:
+                    intra = kis_api.get_intraday_5min_indicators(code)
+                    time.sleep(0.3)
+                except Exception as e:
+                    print(f"[V자반등 청산] {pos['name']} 분봉 조회 실패: {e}")
+
+                should_sell, reason = v_reversal.evaluate_exit(pos, current, profit_pct, intra)
+                if should_sell:
+                    _execute_sell(code, pos, reason, current, profit_pct)
+                continue
+
             # 고점 갱신 (트레일링 스탑용)
             peak = pos.get("peak_price", pos["buy_price"])
             if current > peak:
@@ -1006,12 +1120,14 @@ def _reset_daily_state() -> None:
     """자정이 지나 날짜가 바뀌면 일별 데이터 초기화 (종가베팅 오버나이트 포지션은 유지)"""
     global _watchlist, _closing_watchlist, _trades_today
     global _total_invested_today, _closing_invested_today, _crash_bounce_invested_today
+    global _v_reversal_invested_today
     _watchlist = []
     _closing_watchlist = []
     _trades_today = []
     _total_invested_today = 0
     _closing_invested_today = 0
     _crash_bounce_invested_today = 0
+    _v_reversal_invested_today = 0
     # _closing_positions는 초기화 안 함 - 오버나이트 포지션 유지
     _save_state()
     print(f"[일별 초기화] {_today_kst()} 새 거래일 시작")
@@ -1037,12 +1153,20 @@ def main():
             f"{os.getenv('CRASH_BOUNCE_ENTRY_END', '10:30')} / "
             f"한도 {crash_bounce.MAX_AMOUNT:,}원"
         )
+    v_note = ""
+    if v_reversal.is_enabled():
+        v_note = (
+            f"\n🟢 V자반등: {os.getenv('V_REVERSAL_ENTRY_START', '09:15')}~"
+            f"{os.getenv('V_REVERSAL_ENTRY_END', '10:30')} / "
+            f"한도 {v_reversal.MAX_AMOUNT:,}원"
+        )
     notifier.send(
         f"🤖 자동매매 봇 시작 (장중매매 + 종가베팅) - {now_kst}\n"
         "📌 장중매매: 09:05 스크리닝 → 09:10~14:30 진입 → 14:50 강제청산\n"
         "🌙 종가베팅: 14:00 스크리닝 → 14:20~14:50 매수 → 익일 09:00 시초가 매도\n"
         f"✅ 익절 트레일링 +{TAKE_PROFIT_PCT}% / 손절 -{STOP_LOSS_PCT}% / 15:10 손익보고"
         f"{crash_note}"
+        f"{v_note}"
         f"{closing_pos_note}"
     )
 
