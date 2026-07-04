@@ -18,7 +18,16 @@ def _check_auth():
 
 @flask_app.route("/health")
 def health():
-    return jsonify({"ok": True})
+    import crash_bounce
+    import v_reversal
+    return jsonify({
+        "ok": True,
+        "kis_mode": os.getenv("KIS_MODE", "모의"),
+        "strategies": {
+            "crash_bounce": crash_bounce.is_enabled(),
+            "v_reversal": v_reversal.is_enabled(),
+        },
+    })
 
 
 @flask_app.route("/status")
