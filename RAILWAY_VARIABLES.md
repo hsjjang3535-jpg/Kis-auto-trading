@@ -60,10 +60,12 @@
 | Variable | 기본값 | 설명 |
 |----------|--------|------|
 | `MIN_CHANGE_RATE` | `-2.0` | -2%까지 허용 (그 아래 제외) |
-| `VOL_RATIO_MIN` | `1.5` | 거래량 1.5배 |
-| `W52_GAP_UPPER_MAX` | `7.0` | 상단매매 52주 신고가 % |
+| `VOL_RATIO_MIN` | `1.2` | 거래량 1.2배 |
+| `W52_GAP_UPPER_MAX` | `10.0` | 상단매매 52주 신고가 % |
+| `W52_GAP_LOWER_MAX` | `25.0` | 하단매매 52주 고가 % |
+| `UPPER_TAIL_MAX` | `0.35` | 윗꼬리 비율 상한 |
 | `CLOSING_BET_MIN_RATE` | `1.5` | 종가베팅 당일 +1.5%↑ |
-| `LOWER_RSI_MAX` | `45` | 하단매매 RSI 상한 |
+| `LOWER_RSI_MAX` | `50` | 하단매매 RSI 상한 |
 
 > Variables에 **넣지 않아도** 위 기본값이 적용됩니다.  
 > 예전 값(`CRASH_BOUNCE_MIN_DROP=5.0` 등)을 넣어 두었다면 **삭제하거나** 아래와 맞춰 주세요.

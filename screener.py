@@ -12,10 +12,10 @@
   - 하락 종목 제외 (-2% 미만만 제외, -2%~ 허용)
   - 최소 가격 1,000원 이상
 
-기술 조건 (종산 매매법, 1순위 완화):
-  - 상단매매: 5일선 위, 52주 신고가 7% 이내, 거래량 150%↑, 윗꼬리 30%↓
-  - 하단매매: 20일선 아래, 5일선 위, RSI≤45, 거래량 150%↑, 52주고가 20%이내
-  - 돌파매매: 20일 최고가 돌파, 5일선 위, 거래량 150%↑, 윗꼬리 30%↓
+기술 조건 (종산 매매법, 2순위 완화):
+  - 상단매매: 5일선 위, 52주 신고가 10% 이내, 거래량 120%↑, 윗꼬리 35%↓
+  - 하단매매: 20일선 아래, 5일선 위, RSI≤50, 거래량 120%↑, 52주고가 25%이내
+  - 돌파매매: 20일 최고가 돌파, 5일선 위, 거래량 120%↑, 윗꼬리 35%↓
 
 최종 15개 선정 (상단 > 돌파 > 하단 순)
 """
@@ -27,12 +27,14 @@ MIN_TRADING_VALUE = 10_000_000_000   # 100억
 MIN_PRICE = 1_000                    # 최소 주가 1,000원
 MAX_FINAL = int(os.getenv("MAX_WATCHLIST", "15"))   # 최종 워치리스트 수
 
-# 1순위 완화 (환경변수로 조정 가능)
+# 스크리너 완화 (환경변수로 조정 가능)
 MIN_CHANGE_RATE = float(os.getenv("MIN_CHANGE_RATE", "-2.0"))   # -2%까지 허용
-VOL_RATIO_MIN = float(os.getenv("VOL_RATIO_MIN", "1.5"))        # 상단/돌파/종가
-W52_GAP_UPPER_MAX = float(os.getenv("W52_GAP_UPPER_MAX", "7.0"))  # 상단 52주 신고가 %
+VOL_RATIO_MIN = float(os.getenv("VOL_RATIO_MIN", "1.2"))        # 상단/돌파/하단/종가
+W52_GAP_UPPER_MAX = float(os.getenv("W52_GAP_UPPER_MAX", "10.0"))  # 상단 52주 신고가 %
+W52_GAP_LOWER_MAX = float(os.getenv("W52_GAP_LOWER_MAX", "25.0"))  # 하단 52주 고가 %
+UPPER_TAIL_MAX = float(os.getenv("UPPER_TAIL_MAX", "0.35"))  # 윗꼬리 비율 상한
 CLOSING_BET_MIN_RATE = float(os.getenv("CLOSING_BET_MIN_RATE", "1.5"))  # 종가베팅 당일 상승 %
-LOWER_RSI_MAX = float(os.getenv("LOWER_RSI_MAX", "45"))  # 하단매매 RSI 상한
+LOWER_RSI_MAX = float(os.getenv("LOWER_RSI_MAX", "50"))  # 하단매매 RSI 상한
 
 # 마지막 스크리닝 통계 (텔레그램 보고용)
 _last_screen_stats: dict = {}
@@ -232,17 +234,18 @@ def _apply_technical_filter(stocks: list[dict]) -> tuple[list, list, list]:
             current >= ma5 and
             w52_gap <= W52_GAP_UPPER_MAX and
             vol_ratio >= VOL_RATIO_MIN and
-            upper_tail <= 0.3
+            upper_tail <= UPPER_TAIL_MAX
         )
         # 종산 하단매매
         lower_ok = (
             current < ma20 and current >= ma5 and
-            w52_gap <= 20 and vol_ratio >= 1.5 and rsi <= LOWER_RSI_MAX
+            w52_gap <= W52_GAP_LOWER_MAX and
+            vol_ratio >= VOL_RATIO_MIN and rsi <= LOWER_RSI_MAX
         )
         breakout_ok = (
             high_20 > 0 and current >= high_20 * 0.995 and
             current >= ma5 and vol_ratio >= VOL_RATIO_MIN and
-            upper_tail <= 0.3 and not upper_ok
+            upper_tail <= UPPER_TAIL_MAX and not upper_ok
         )
 
         if upper_ok:
