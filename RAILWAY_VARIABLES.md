@@ -66,6 +66,7 @@
 | `UPPER_TAIL_MAX` | `0.35` | 윗꼬리 비율 상한 |
 | `CLOSING_BET_MIN_RATE` | `1.5` | 종가베팅 당일 +1.5%↑ |
 | `LOWER_RSI_MAX` | `50` | 하단매매 RSI 상한 |
+| `ENABLE_INTRADAY_AI` | `false` | 장중 AI (`true`=Groq 2차 필터, `false`=기술조건만) |
 
 > Variables에 **넣지 않아도** 위 기본값이 적용됩니다.  
 > 예전 값(`CRASH_BOUNCE_MIN_DROP=5.0` 등)을 넣어 두었다면 **삭제하거나** 아래와 맞춰 주세요.

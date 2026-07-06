@@ -46,6 +46,8 @@ BUY_RATIO = float(os.getenv("BUY_RATIO", "0.5"))
 MAX_CLOSING_AMOUNT = int(os.getenv("MAX_CLOSING_AMOUNT", "500000"))  # 종가베팅 총 한도
 MAX_CLOSING_BUY = int(os.getenv("MAX_CLOSING_BUY", "250000"))        # 종가베팅 1회 매수
 CLOSING_BET_MAX_PER_SLOT = int(os.getenv("CLOSING_BET_MAX_PER_SLOT", "2"))  # 5분 슬롯당 최대 매수 종목
+# 장중매매 AI (false=기술 통과만 워치리스트, 종가베팅 AI는 별도 유지)
+ENABLE_INTRADAY_AI = os.getenv("ENABLE_INTRADAY_AI", "false").lower() == "true"
 
 _STATE_FILE = "trading_state.json"
 
@@ -349,52 +351,69 @@ def run_morning_screening() -> bool:
 
         approved = []
         ai_rejected = []
-        ai_fail_count = 0
-        for c in candidates:
-            result = ai_analyzer.analyze(
-                c["name"], c["code"], c["change_rate"],
-                strategy=c.get("strategy", ""),
-                rsi=c.get("rsi"), vol_ratio=c.get("vol_ratio"),
-                current=c.get("current"), ma5=c.get("ma5"),
-                w52_gap=c.get("w52_gap"),
-            )
-            c["buy"] = ai_analyzer.is_approved(result)
-            c["strength"] = result["strength"]
-            c["reason"] = result["reason"]
-            if result["reason"] == "분석 실패":
-                ai_fail_count += 1
-            if c["buy"]:
-                approved.append(c)
-            else:
-                ai_rejected.append({
-                    "name": c["name"], "code": c["code"],
-                    "strategy": c.get("strategy", ""),
-                    "reason": result["reason"],
-                })
-            time.sleep(2)  # Groq API 속도 제한 방지 (분당 30회)
+        ai_skipped = not ENABLE_INTRADAY_AI
+        ai_unavailable = False
 
-        # AI가 전부 실패한 경우 → 기술적 조건 통과 종목만으로 진행
-        ai_unavailable = candidates and ai_fail_count == len(candidates)
-        if ai_unavailable:
-            notifier.send(
-                "⚠️ <b>AI 분석 서버 일시 불가</b>\n"
-                "Groq API 전체 다운 → 기술적 조건 통과 종목으로 진행합니다."
-            )
-            approved = candidates
-            ai_rejected = []
+        if ai_skipped:
+            approved = list(candidates)
             for c in approved:
-                c.setdefault("reason", "AI 분석 불가 (기술적 조건 통과)")
+                c["buy"] = True
+                c["strength"] = "-"
+                c["reason"] = "기술적 조건 통과 (장중 AI 생략)"
+            print(f"[장중 AI 생략] 기술 통과 {len(approved)}개 → 워치리스트")
+        else:
+            ai_fail_count = 0
+            for c in candidates:
+                result = ai_analyzer.analyze(
+                    c["name"], c["code"], c["change_rate"],
+                    strategy=c.get("strategy", ""),
+                    rsi=c.get("rsi"), vol_ratio=c.get("vol_ratio"),
+                    current=c.get("current"), ma5=c.get("ma5"),
+                    w52_gap=c.get("w52_gap"),
+                )
+                c["buy"] = ai_analyzer.is_approved(result)
+                c["strength"] = result["strength"]
+                c["reason"] = result["reason"]
+                if result["reason"] == "분석 실패":
+                    ai_fail_count += 1
+                if c["buy"]:
+                    approved.append(c)
+                else:
+                    ai_rejected.append({
+                        "name": c["name"], "code": c["code"],
+                        "strategy": c.get("strategy", ""),
+                        "reason": result["reason"],
+                    })
+                time.sleep(2)  # Groq API 속도 제한 방지 (분당 30회)
+
+            # AI가 전부 실패한 경우 → 기술적 조건 통과 종목만으로 진행
+            ai_unavailable = candidates and ai_fail_count == len(candidates)
+            if ai_unavailable:
+                notifier.send(
+                    "⚠️ <b>AI 분석 서버 일시 불가</b>\n"
+                    "Groq API 전체 다운 → 기술적 조건 통과 종목으로 진행합니다."
+                )
+                approved = candidates
+                ai_rejected = []
+                for c in approved:
+                    c.setdefault("reason", "AI 분석 불가 (기술적 조건 통과)")
 
         _last_morning_summary = {
             "stats": stats,
             "candidates": len(candidates),
             "approved": len(approved),
             "ai_rejected": ai_rejected,
+            "ai_skipped": ai_skipped,
         }
         _watchlist = approved
 
         if approved:
-            ai_note = " (AI 미적용)" if ai_unavailable else ""
+            if ai_skipped:
+                ai_note = " (AI 생략)"
+            elif ai_unavailable:
+                ai_note = " (AI 미적용)"
+            else:
+                ai_note = ""
             lines = [f"🔍 <b>장중매매 워치리스트 {len(approved)}개{ai_note}</b>\n"]
             strategy_map = {"상단매매": "🔴", "돌파매매": "🟡", "하단매매": "🔵", "낙폭반등": "🔶", "V자반등": "🟢"}
             for c in approved:
@@ -1205,6 +1224,7 @@ def main():
     notifier.send(
         f"🤖 자동매매 봇 시작 (장중매매 + 종가베팅) - {now_kst}\n"
         "📌 장중매매: 09:05 스크리닝 → 09:10~14:30 진입 → 14:50 강제청산\n"
+        f"   장중 AI: {'ON (Groq)' if ENABLE_INTRADAY_AI else 'OFF (기술조건만)'}\n"
         "🌙 종가베팅: 14:00 스크리닝 → 14:20~14:50 매수 → 익일 09:00 시초가 매도\n"
         f"✅ 익절 트레일링 +{TAKE_PROFIT_PCT}% / 손절 -{STOP_LOSS_PCT}% / 15:10 손익보고"
         f"{crash_note}"

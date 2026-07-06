@@ -24,6 +24,7 @@ def health():
         "ok": True,
         "kis_mode": os.getenv("KIS_MODE", "모의"),
         "strategies": {
+            "intraday_ai": os.getenv("ENABLE_INTRADAY_AI", "false").lower() == "true",
             "crash_bounce": crash_bounce.is_enabled(),
             "v_reversal": v_reversal.is_enabled(),
         },
