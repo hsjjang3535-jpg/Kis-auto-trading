@@ -45,6 +45,7 @@ BUY_RATIO = float(os.getenv("BUY_RATIO", "0.5"))
 # 종가베팅 자금 한도 (별도 관리)
 MAX_CLOSING_AMOUNT = int(os.getenv("MAX_CLOSING_AMOUNT", "500000"))  # 종가베팅 총 한도
 MAX_CLOSING_BUY = int(os.getenv("MAX_CLOSING_BUY", "250000"))        # 종가베팅 1회 매수
+CLOSING_BET_MAX_PER_SLOT = int(os.getenv("CLOSING_BET_MAX_PER_SLOT", "2"))  # 5분 슬롯당 최대 매수 종목
 
 _STATE_FILE = "trading_state.json"
 
@@ -636,18 +637,40 @@ def _check_closing_bet_entry() -> None:
         return
 
     global _closing_invested_today
-    remaining = MAX_CLOSING_AMOUNT - _closing_invested_today
+    budget_remaining = MAX_CLOSING_AMOUNT - _closing_invested_today
+    if budget_remaining <= 0:
+        return
+
+    try:
+        cash = kis_api.get_orderable_cash()
+    except Exception as e:
+        print(f"[종가베팅] 예수금 조회 실패: {e}")
+        notifier.notify_error(f"종가베팅 예수금 조회 실패 — 매수 중단: {e}")
+        return
+
+    remaining = min(budget_remaining, cash)
     if remaining <= 0:
+        notifier.send(
+            f"⚠️ 종가베팅 매수 불가 — 주문가능금액 {cash:,}원 "
+            f"(한도 {budget_remaining:,}원)"
+        )
         return
 
     already_held = set(_closing_positions.keys())
+    bought_this_slot = 0
+    pending = [
+        s for s in _closing_watchlist
+        if s["code"] not in already_held
+    ]
 
-    for stock in _closing_watchlist:
+    for stock in pending:
+        if bought_this_slot >= CLOSING_BET_MAX_PER_SLOT:
+            break
+        if remaining <= 0:
+            break
+
         code = stock["code"]
         name = stock["name"]
-
-        if code in already_held:
-            continue
 
         try:
             current = kis_api.get_current_price(code, fallback=stock.get("current"))
@@ -674,18 +697,37 @@ def _check_closing_bet_entry() -> None:
                 }
                 _save_state()
                 already_held.add(code)
-                remaining = MAX_CLOSING_AMOUNT - _closing_invested_today
-                notifier.notify_buy(name, code, quantity, int(current), f"[종가베팅] {stock.get('reason', '')}")
-
-                if remaining <= 0:
-                    break
+                remaining = min(
+                    MAX_CLOSING_AMOUNT - _closing_invested_today,
+                    cash - invested,
+                )
+                cash = max(0, cash - invested)
+                bought_this_slot += 1
+                notifier.notify_buy(
+                    name, code, quantity, int(current),
+                    f"[종가베팅] {stock.get('reason', '')}",
+                )
+                print(f"[종가베팅] 매수 {name}({code}) {quantity}주 @ {int(current):,}")
             else:
                 msg = result.get("msg1", "알 수 없는 오류")
                 notifier.notify_error(f"{name} 종가베팅 매수 실패: {msg}")
 
-            time.sleep(0.5)
+            time.sleep(kis_api.trade_interval())
 
         except Exception as e:
+            if kis_api.is_systemic_order_error(e):
+                skip_names = [
+                    s["name"] for s in pending
+                    if s["code"] not in already_held and s["code"] != code
+                ]
+                notifier.notify_error(
+                    f"종가베팅 주문 API 일시 오류 — {name} 실패, "
+                    f"나머지 {len(skip_names)}종목 스킵"
+                    f"{(' (' + ', '.join(skip_names[:3]) + ')') if skip_names else ''}\n"
+                    f"사유: {e}\n"
+                    f"(모의 API 한도·서버 오류. 5분 후 재시도)"
+                )
+                break
             notifier.notify_error(f"{name} 종가베팅 진입 오류: {e}")
 
 

@@ -1,4 +1,5 @@
 import os
+import json
 import time
 import requests
 from datetime import datetime, timedelta
@@ -24,6 +25,8 @@ _token_cache = {
     "market": {"token": None, "expires_at": None},  # 시세 조회용 (항상 실전 서버)
     "trade":  {"token": None, "expires_at": None},  # 주문/계좌용 (모드에 따라)
 }
+
+_last_trade_call = 0.0
 
 
 def _fetch_token(server_url: str) -> str:
@@ -104,12 +107,91 @@ def _market_get(path: str, tr_id: str, params: dict, retries: int = 3) -> dict:
 def _trade_headers(tr_id: str) -> dict:
     """주문/계좌 조회용 헤더 (모드별 토큰)"""
     return {
-        "Content-Type": "application/json",
+        "Content-Type": "application/json; charset=UTF-8",
         "authorization": f"Bearer {_get_trade_token()}",
         "appkey": APP_KEY,
         "appsecret": APP_SECRET,
         "tr_id": tr_id,
+        "custtype": "P",
     }
+
+
+def _trade_interval() -> float:
+    """모의투자 초당 2건 → 1초 간격, 실전은 여유"""
+    return 1.0 if MODE != "실전" else 0.05
+
+
+def trade_interval() -> float:
+    return _trade_interval()
+
+
+def _trade_throttle() -> None:
+    global _last_trade_call
+    gap = _trade_interval()
+    now = time.monotonic()
+    wait = gap - (now - _last_trade_call)
+    if wait > 0:
+        time.sleep(wait)
+    _last_trade_call = time.monotonic()
+
+
+def is_systemic_order_error(exc: Exception) -> bool:
+    """서버/한도 오류 — 연속 주문 중단 권장"""
+    if isinstance(exc, requests.HTTPError) and exc.response is not None:
+        if exc.response.status_code in (500, 502, 503, 504):
+            return True
+    msg = str(exc).lower()
+    return any(x in msg for x in ("500", "502", "503", "504", "server error"))
+
+
+def _should_retry_trade(exc: Exception) -> bool:
+    return is_systemic_order_error(exc)
+
+
+def _trade_post(path: str, tr_id: str, body: dict, retries: int = 3) -> dict:
+    """주문 POST (Content-Length 명시, 500 재시도, 모의 API 간격)"""
+    url = f"{TRADE_URL}{path}"
+    payload = json.dumps(body, ensure_ascii=False, separators=(",", ":"))
+    last_err: Exception | None = None
+
+    for attempt in range(retries):
+        _trade_throttle()
+        try:
+            res = requests.post(
+                url,
+                headers=_trade_headers(tr_id),
+                data=payload.encode("utf-8"),
+                timeout=15,
+            )
+            if res.status_code == 404 and MODE != "실전":
+                raise RuntimeError(
+                    f"모의투자 서버 404 오류: 계좌번호·앱키 확인 필요 (VTS 서버 {TRADE_URL})"
+                )
+
+            if res.status_code in (500, 502, 503, 504):
+                detail = res.text[:200]
+                try:
+                    err_json = res.json()
+                    detail = err_json.get("msg1") or err_json.get("msg_cd") or detail
+                except Exception:
+                    pass
+                raise requests.HTTPError(
+                    f"{res.status_code} Server Error: {detail} for url: {res.url}",
+                    response=res,
+                )
+
+            res.raise_for_status()
+            return res.json()
+        except Exception as e:
+            last_err = e
+            if attempt < retries - 1 and _should_retry_trade(e):
+                wait = 1 + attempt * 2
+                print(f"[KIS 주문 재시도] {path} ({attempt + 1}/{retries}) {e} → {wait}초 후")
+                time.sleep(wait)
+                continue
+            break
+
+    raise last_err or RuntimeError(f"KIS 주문 API 실패: {path}")
 
 
 def get_top_trading_value(top_n: int = 20, market: str = "0000") -> list[dict]:
@@ -434,10 +516,10 @@ def buy_stock(stock_code: str, quantity: int) -> dict:
     acc_prod = ACCOUNT_NO[8:] if len(ACCOUNT_NO) > 8 else "01"
     tr_id = "TTTC0802U" if MODE == "실전" else "VTTC0802U"
 
-    res = requests.post(
-        f"{TRADE_URL}/uapi/domestic-stock/v1/trading/order-cash",
-        headers=_trade_headers(tr_id),
-        json={
+    data = _trade_post(
+        "/uapi/domestic-stock/v1/trading/order-cash",
+        tr_id,
+        {
             "CANO": acc_no,
             "ACNT_PRDT_CD": acc_prod,
             "PDNO": stock_code,
@@ -445,15 +527,7 @@ def buy_stock(stock_code: str, quantity: int) -> dict:
             "ORD_QTY": str(quantity),
             "ORD_UNPR": "0",
         },
-        timeout=10,
     )
-    if res.status_code == 404 and MODE != "실전":
-        raise RuntimeError(
-            f"모의투자 서버 404 오류: 계좌번호·앱키 확인 필요 (VTS 서버 {TRADE_URL})"
-        )
-    res.raise_for_status()
-    data = res.json()
-    # KIS API는 HTTP 200이어도 rt_cd != "0" 이면 오류
     if data.get("rt_cd") != "0":
         msg = data.get("msg1", "알 수 없는 오류")
         print(f"[매수 API 오류] {stock_code}: {msg}")
@@ -466,10 +540,10 @@ def sell_stock(stock_code: str, quantity: int) -> dict:
     acc_prod = ACCOUNT_NO[8:] if len(ACCOUNT_NO) > 8 else "01"
     tr_id = "TTTC0801U" if MODE == "실전" else "VTTC0801U"
 
-    res = requests.post(
-        f"{TRADE_URL}/uapi/domestic-stock/v1/trading/order-cash",
-        headers=_trade_headers(tr_id),
-        json={
+    data = _trade_post(
+        "/uapi/domestic-stock/v1/trading/order-cash",
+        tr_id,
+        {
             "CANO": acc_no,
             "ACNT_PRDT_CD": acc_prod,
             "PDNO": stock_code,
@@ -477,14 +551,7 @@ def sell_stock(stock_code: str, quantity: int) -> dict:
             "ORD_QTY": str(quantity),
             "ORD_UNPR": "0",
         },
-        timeout=10,
     )
-    if res.status_code == 404 and MODE != "실전":
-        raise RuntimeError(
-            f"모의투자 서버 404 오류: 계좌번호·앱키 확인 필요 (VTS 서버 {TRADE_URL})"
-        )
-    res.raise_for_status()
-    data = res.json()
     if data.get("rt_cd") != "0":
         msg = data.get("msg1", "알 수 없는 오류")
         print(f"[매도 API 오류] {stock_code}: {msg}")
@@ -521,10 +588,16 @@ def get_holdings() -> list[dict]:
 
 def get_cash_balance() -> int:
     """실제 계좌 예수금(주문가능금액) 조회"""
+    return get_orderable_cash()
+
+
+def get_orderable_cash() -> int:
+    """주문 가능 현금 (매수가능금액 우선)"""
     acc_no = ACCOUNT_NO[:8]
     acc_prod = ACCOUNT_NO[8:] if len(ACCOUNT_NO) > 8 else "01"
     tr_id = "TTTC8434R" if MODE == "실전" else "VTTC8434R"
 
+    _trade_throttle()
     res = requests.get(
         f"{TRADE_URL}/uapi/domestic-stock/v1/trading/inquire-balance",
         headers=_trade_headers(tr_id),
@@ -545,10 +618,15 @@ def get_cash_balance() -> int:
     )
     res.raise_for_status()
     data = res.json()
-    # output2: 계좌 요약 정보 (예수금, 총평가금액 등)
     summary = data.get("output2", [{}])
     if isinstance(summary, list):
         summary = summary[0] if summary else {}
-    # dnca_tot_amt: 예수금 총액 / prvs_rcdl_excc_amt: 전일 매매 청산 금액
-    cash = int(summary.get("dnca_tot_amt", "0") or "0")
-    return cash
+
+    for key in ("ord_psbl_cash", "nrcvb_buy_amt", "dnca_tot_amt"):
+        try:
+            val = int(summary.get(key, "0") or "0")
+        except (ValueError, TypeError):
+            val = 0
+        if val > 0:
+            return val
+    return 0
