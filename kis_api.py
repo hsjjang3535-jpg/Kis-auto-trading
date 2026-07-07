@@ -12,7 +12,16 @@ load_dotenv()
 
 APP_KEY = os.getenv("KIS_APP_KEY")
 APP_SECRET = os.getenv("KIS_APP_SECRET")
-MODE = os.getenv("KIS_MODE", "실전")
+
+
+def _normalize_mode(raw: str) -> str:
+    v = (raw or "모의").strip().lower()
+    if v in ("실전", "prod", "real", "production"):
+        return "실전"
+    return "모의"
+
+
+MODE = _normalize_mode(os.getenv("KIS_MODE", "모의"))
 ACCOUNT_NO = os.getenv("KIS_ACCOUNT_NO", "")
 
 # 시장 데이터(시세/차트)는 항상 실전 서버 사용 (VTS 서버는 시세 API 미지원)
@@ -27,6 +36,80 @@ _token_cache = {
 }
 
 _last_trade_call = 0.0
+
+
+def get_account_parts() -> tuple[str, str]:
+    """CANO(8자리), ACNT_PRDT_CD(2자리) 반환"""
+    cano = os.getenv("KIS_CANO", "").strip()
+    prod = os.getenv("KIS_ACNT_PRDT_CD", "").strip()
+    if cano and prod:
+        return cano.zfill(8)[-8:], prod.zfill(2)[-2:]
+
+    raw = (ACCOUNT_NO or "").strip().replace("-", "").replace(" ", "")
+    if not raw:
+        raise ValueError("KIS_ACCOUNT_NO 또는 KIS_CANO/KIS_ACNT_PRDT_CD가 필요합니다")
+
+    if len(raw) >= 10:
+        return raw[:8], raw[8:10]
+    if len(raw) == 8:
+        return raw, prod or "01"
+    raise ValueError(
+        f"계좌번호 형식 오류 ({raw}): 10자리(8+2) 또는 8자리+KIS_ACNT_PRDT_CD"
+    )
+
+
+def validate_account_for_mode() -> str | None:
+    """모의/실전과 계좌번호 불일치 시 안내 문구 반환"""
+    if MODE == "실전":
+        return None
+    try:
+        cano, prod = get_account_parts()
+    except ValueError as e:
+        return str(e)
+    if cano.startswith(("50", "4444", "00")):
+        return None
+    if len(cano) == 8:
+        return (
+            f"KIS_MODE=모의인데 KIS_ACCOUNT_NO({cano}{prod})가 실계좌로 보입니다. "
+            "모의투자 계좌(보통 50xxxxxxxx)를 KIS Developers → 모의투자에서 확인 후 "
+            "Railway Variables의 KIS_ACCOUNT_NO를 수정하세요. "
+            "모의투자 앱키와 모의 계좌번호가 쌍으로 맞아야 합니다."
+        )
+    return None
+
+
+def is_account_error(exc: Exception) -> bool:
+    msg = str(exc)
+    return any(k in msg for k in (
+        "계좌번호", "계좌", "CANO", "ACNT_PRDT", "인증 시점",
+    ))
+
+
+def account_error_hint() -> str:
+    hint = validate_account_for_mode()
+    if hint:
+        return hint
+    if MODE != "실전":
+        return (
+            "모의투자: KIS Developers에서 발급한 모의 계좌번호(50xxxxxxxx)와 "
+            "모의투자 앱키를 Railway에 설정했는지 확인하세요."
+        )
+    return "KIS_ACCOUNT_NO(8+2자리)와 실전 앱키가 일치하는지 확인하세요."
+
+
+def verify_trade_account() -> tuple[bool, str]:
+    """시작 시 주문/잔고 API 연결 검증"""
+    warn = validate_account_for_mode()
+    try:
+        cano, prod = get_account_parts()
+        cash = get_orderable_cash()
+        msg = f"계좌 {cano}-{prod} 연결 OK (주문가능 {cash:,}원)"
+        if warn:
+            msg = f"{warn}\n(잔고 조회는 성공했으나 주문 시 오류 가능)"
+        return True, msg
+    except Exception as e:
+        extra = f"\n{warn}" if warn else f"\n{account_error_hint()}"
+        return False, f"계좌 API 연결 실패: {e}{extra}"
 
 
 def _fetch_token(server_url: str) -> str:
@@ -104,9 +187,9 @@ def _market_get(path: str, tr_id: str, params: dict, retries: int = 3) -> dict:
             break
     raise last_err or RuntimeError(f"KIS API 호출 실패: {path}")
 
-def _trade_headers(tr_id: str) -> dict:
+def _trade_headers(tr_id: str, body: dict | None = None) -> dict:
     """주문/계좌 조회용 헤더 (모드별 토큰)"""
-    return {
+    headers = {
         "Content-Type": "application/json; charset=UTF-8",
         "authorization": f"Bearer {_get_trade_token()}",
         "appkey": APP_KEY,
@@ -114,6 +197,34 @@ def _trade_headers(tr_id: str) -> dict:
         "tr_id": tr_id,
         "custtype": "P",
     }
+    if body:
+        try:
+            headers["hashkey"] = _get_hashkey(body)
+        except Exception as e:
+            print(f"[hashkey] 생성 실패 ({e}), hashkey 없이 진행")
+    return headers
+
+
+def _get_hashkey(body: dict) -> str:
+    """주문 POST body용 hashkey 발급"""
+    payload = json.dumps(body, ensure_ascii=False, separators=(",", ":"))
+    _trade_throttle()
+    res = requests.post(
+        f"{TRADE_URL}/uapi/hashkey",
+        headers={
+            "Content-Type": "application/json; charset=UTF-8",
+            "appkey": APP_KEY,
+            "appsecret": APP_SECRET,
+        },
+        data=payload.encode("utf-8"),
+        timeout=10,
+    )
+    res.raise_for_status()
+    data = res.json()
+    h = data.get("HASH") or data.get("hash")
+    if not h:
+        raise RuntimeError(f"hashkey 응답 없음: {data}")
+    return h
 
 
 def _trade_interval() -> float:
@@ -136,12 +247,26 @@ def _trade_throttle() -> None:
 
 
 def is_systemic_order_error(exc: Exception) -> bool:
-    """서버/한도 오류 — 연속 주문 중단 권장"""
+    """서버/한도 오류 — 연속 주문 중단 권장 (계좌 오류 제외)"""
+    if is_account_error(exc):
+        return False
     if isinstance(exc, requests.HTTPError) and exc.response is not None:
         if exc.response.status_code in (500, 502, 503, 504):
             return True
     msg = str(exc).lower()
     return any(x in msg for x in ("500", "502", "503", "504", "server error"))
+
+
+def _parse_trade_error(res: requests.Response) -> str:
+    try:
+        err_json = res.json()
+        msg_cd = err_json.get("msg_cd", "")
+        msg1 = err_json.get("msg1", "")
+        if msg_cd and msg1:
+            return f"{msg_cd}: {msg1}"
+        return msg1 or msg_cd or res.text[:200]
+    except Exception:
+        return res.text[:200] or res.reason
 
 
 def _should_retry_trade(exc: Exception) -> bool:
@@ -157,9 +282,10 @@ def _trade_post(path: str, tr_id: str, body: dict, retries: int = 3) -> dict:
     for attempt in range(retries):
         _trade_throttle()
         try:
+            headers = _trade_headers(tr_id, body)
             res = requests.post(
                 url,
-                headers=_trade_headers(tr_id),
+                headers=headers,
                 data=payload.encode("utf-8"),
                 timeout=15,
             )
@@ -169,19 +295,24 @@ def _trade_post(path: str, tr_id: str, body: dict, retries: int = 3) -> dict:
                 )
 
             if res.status_code in (500, 502, 503, 504):
-                detail = res.text[:200]
-                try:
-                    err_json = res.json()
-                    detail = err_json.get("msg1") or err_json.get("msg_cd") or detail
-                except Exception:
-                    pass
+                detail = _parse_trade_error(res)
                 raise requests.HTTPError(
                     f"{res.status_code} Server Error: {detail} for url: {res.url}",
                     response=res,
                 )
 
+            if res.status_code >= 400:
+                detail = _parse_trade_error(res)
+                raise RuntimeError(f"KIS 주문 API 오류 ({res.status_code}): {detail}")
+
             res.raise_for_status()
-            return res.json()
+            data = res.json()
+            if data.get("rt_cd") not in (None, "0"):
+                msg_cd = data.get("msg_cd", "")
+                msg1 = data.get("msg1", "알 수 없는 오류")
+                detail = f"{msg_cd}: {msg1}" if msg_cd else msg1
+                raise RuntimeError(f"KIS 주문 거부: {detail}")
+            return data
         except Exception as e:
             last_err = e
             if attempt < retries - 1 and _should_retry_trade(e):
@@ -512,22 +643,28 @@ def is_near_high(stock_code: str, threshold_pct: float = 5.0) -> bool:
 
 def buy_stock(stock_code: str, quantity: int) -> dict:
     """시장가 매수"""
-    acc_no = ACCOUNT_NO[:8]
-    acc_prod = ACCOUNT_NO[8:] if len(ACCOUNT_NO) > 8 else "01"
+    acc_no, acc_prod = get_account_parts()
     tr_id = "TTTC0802U" if MODE == "실전" else "VTTC0802U"
 
-    data = _trade_post(
-        "/uapi/domestic-stock/v1/trading/order-cash",
-        tr_id,
-        {
-            "CANO": acc_no,
-            "ACNT_PRDT_CD": acc_prod,
-            "PDNO": stock_code,
-            "ORD_DVSN": "01",  # 시장가
-            "ORD_QTY": str(quantity),
-            "ORD_UNPR": "0",
-        },
-    )
+    body = {
+        "CANO": acc_no,
+        "ACNT_PRDT_CD": acc_prod,
+        "PDNO": stock_code,
+        "ORD_DVSN": "01",  # 시장가
+        "ORD_QTY": str(quantity),
+        "ORD_UNPR": "0",
+        "EXCG_ID_DVSN_CD": "KRX",
+    }
+    try:
+        data = _trade_post(
+            "/uapi/domestic-stock/v1/trading/order-cash",
+            tr_id,
+            body,
+        )
+    except Exception as e:
+        if is_account_error(e):
+            raise RuntimeError(f"{e}\n{account_error_hint()}") from e
+        raise
     if data.get("rt_cd") != "0":
         msg = data.get("msg1", "알 수 없는 오류")
         print(f"[매수 API 오류] {stock_code}: {msg}")
@@ -536,22 +673,29 @@ def buy_stock(stock_code: str, quantity: int) -> dict:
 
 def sell_stock(stock_code: str, quantity: int) -> dict:
     """시장가 매도"""
-    acc_no = ACCOUNT_NO[:8]
-    acc_prod = ACCOUNT_NO[8:] if len(ACCOUNT_NO) > 8 else "01"
+    acc_no, acc_prod = get_account_parts()
     tr_id = "TTTC0801U" if MODE == "실전" else "VTTC0801U"
 
-    data = _trade_post(
-        "/uapi/domestic-stock/v1/trading/order-cash",
-        tr_id,
-        {
-            "CANO": acc_no,
-            "ACNT_PRDT_CD": acc_prod,
-            "PDNO": stock_code,
-            "ORD_DVSN": "01",  # 시장가
-            "ORD_QTY": str(quantity),
-            "ORD_UNPR": "0",
-        },
-    )
+    body = {
+        "CANO": acc_no,
+        "ACNT_PRDT_CD": acc_prod,
+        "PDNO": stock_code,
+        "ORD_DVSN": "01",  # 시장가
+        "ORD_QTY": str(quantity),
+        "ORD_UNPR": "0",
+        "EXCG_ID_DVSN_CD": "KRX",
+        "SLL_TYPE": "01",
+    }
+    try:
+        data = _trade_post(
+            "/uapi/domestic-stock/v1/trading/order-cash",
+            tr_id,
+            body,
+        )
+    except Exception as e:
+        if is_account_error(e):
+            raise RuntimeError(f"{e}\n{account_error_hint()}") from e
+        raise
     if data.get("rt_cd") != "0":
         msg = data.get("msg1", "알 수 없는 오류")
         print(f"[매도 API 오류] {stock_code}: {msg}")
@@ -560,8 +704,7 @@ def sell_stock(stock_code: str, quantity: int) -> dict:
 
 def get_holdings() -> list[dict]:
     """보유 종목 조회"""
-    acc_no = ACCOUNT_NO[:8]
-    acc_prod = ACCOUNT_NO[8:] if len(ACCOUNT_NO) > 8 else "01"
+    acc_no, acc_prod = get_account_parts()
     tr_id = "TTTC8434R" if MODE == "실전" else "VTTC8434R"
 
     res = requests.get(
@@ -593,8 +736,7 @@ def get_cash_balance() -> int:
 
 def get_orderable_cash() -> int:
     """주문 가능 현금 (매수가능금액 우선)"""
-    acc_no = ACCOUNT_NO[:8]
-    acc_prod = ACCOUNT_NO[8:] if len(ACCOUNT_NO) > 8 else "01"
+    acc_no, acc_prod = get_account_parts()
     tr_id = "TTTC8434R" if MODE == "실전" else "VTTC8434R"
 
     _trade_throttle()
@@ -618,6 +760,14 @@ def get_orderable_cash() -> int:
     )
     res.raise_for_status()
     data = res.json()
+    if data.get("rt_cd") not in (None, "0"):
+        msg_cd = data.get("msg_cd", "")
+        msg1 = data.get("msg1", "알 수 없는 오류")
+        detail = f"{msg_cd}: {msg1}" if msg_cd else msg1
+        err = RuntimeError(f"KIS 잔고 조회 오류: {detail}")
+        if is_account_error(err):
+            raise RuntimeError(f"{detail}\n{account_error_hint()}") from err
+        raise err
     summary = data.get("output2", [{}])
     if isinstance(summary, list):
         summary = summary[0] if summary else {}

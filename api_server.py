@@ -18,11 +18,14 @@ def _check_auth():
 
 @flask_app.route("/health")
 def health():
+    import kis_api
     import crash_bounce
     import v_reversal
+    warn = kis_api.validate_account_for_mode()
     return jsonify({
         "ok": True,
         "kis_mode": os.getenv("KIS_MODE", "모의"),
+        "account_warning": warn,
         "strategies": {
             "intraday_ai": os.getenv("ENABLE_INTRADAY_AI", "false").lower() == "true",
             "crash_bounce": crash_bounce.is_enabled(),

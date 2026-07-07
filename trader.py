@@ -1053,6 +1053,11 @@ def _check_entry() -> None:
             time.sleep(0.5)
 
         except Exception as e:
+            if kis_api.is_account_error(e):
+                notifier.notify_error(
+                    f"⚠️ <b>{name} 매수 중단 — 계좌 설정 오류</b>\n{e}"
+                )
+                break
             notifier.notify_error(f"{name} 진입 체크 오류: {e}")
 
 
@@ -1200,6 +1205,9 @@ def main():
     print("=== KIS 자동매매 시작 (종산 장중매매) ===")
     _load_state()
 
+    acc_ok, acc_msg = kis_api.verify_trade_account()
+    print(f"[계좌 검증] {acc_msg}")
+
     # HTTP API 서버를 별도 스레드로 시작 (텔레그램 봇 연동)
     import api_server, threading
     api_thread = threading.Thread(target=api_server.start_api_server, daemon=True)
@@ -1223,6 +1231,7 @@ def main():
         )
     notifier.send(
         f"🤖 자동매매 봇 시작 (장중매매 + 종가베팅) - {now_kst}\n"
+        f"{'✅' if acc_ok else '⚠️'} 계좌: {acc_msg}\n"
         "📌 장중매매: 09:05 스크리닝 → 09:10~14:30 진입 → 14:50 강제청산\n"
         f"   장중 AI: {'ON (Groq)' if ENABLE_INTRADAY_AI else 'OFF (기술조건만)'}\n"
         "🌙 종가베팅: 14:00 스크리닝 → 14:20~14:50 매수 → 익일 09:00 시초가 매도\n"

@@ -16,11 +16,16 @@
 |----------|------|-----------|
 | `KIS_APP_KEY` | 한국투자증권 앱키 (**모의투자용**) | `(발급받은 키)` |
 | `KIS_APP_SECRET` | 한국투자증권 앱시크릿 | `(발급받은 시크릿)` |
-| `KIS_ACCOUNT_NO` | 계좌번호 (하이픈 없이) | `5012345678` |
+| `KIS_ACCOUNT_NO` | 계좌번호 (하이픈 없이) | 모의: `5012345601` (50으로 시작) |
+| `KIS_CANO` | (선택) 계좌 앞 8자리 | `50123456` |
+| `KIS_ACNT_PRDT_CD` | (선택) 상품코드 2자리 | `01` |
 | `GROQ_API_KEY` | Groq AI (스크리닝 분석) | `gsk_...` |
 | `TELEGRAM_BOT_TOKEN` | 텔레그램 봇 토큰 | `(BotFather 발급)` |
 | `TELEGRAM_CHAT_ID` | 알림 받을 chat id | `(숫자)` |
 | `API_SECRET` | 텔레그램봇 ↔ 매매봇 연동 비밀값 | `(임의 긴 문자열)` |
+
+> **모의투자:** `KIS_APP_KEY`는 **모의투자용** 앱키, `KIS_ACCOUNT_NO`는 **모의 계좌**(보통 `50xxxxxxxx`)여야 합니다.  
+> 실계좌번호를 넣으면 `인증 시점의 계좌번호와 요청 계좌번호가 일치하지 않습니다` 오류가 납니다.
 
 > `API_SECRET`은 **telegram-gemini-bot (trading)** 의 `API_SECRET`과 **동일**해야 합니다.
 
