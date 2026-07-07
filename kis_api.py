@@ -97,8 +97,8 @@ def account_error_hint() -> str:
     return "KIS_ACCOUNT_NO(8+2자리)와 실전 앱키가 일치하는지 확인하세요."
 
 
-def verify_trade_account() -> tuple[bool, str]:
-    """시작 시 주문/잔고 API 연결 검증"""
+def verify_trade_account() -> tuple[bool, str, int | None]:
+    """시작 시 주문/잔고 API 연결 검증. (성공여부, 메시지, 주문가능금액)"""
     warn = validate_account_for_mode()
     try:
         cano, prod = get_account_parts()
@@ -106,10 +106,10 @@ def verify_trade_account() -> tuple[bool, str]:
         msg = f"계좌 {cano}-{prod} 연결 OK (주문가능 {cash:,}원)"
         if warn:
             msg = f"{warn}\n(잔고 조회는 성공했으나 주문 시 오류 가능)"
-        return True, msg
+        return True, msg, cash
     except Exception as e:
         extra = f"\n{warn}" if warn else f"\n{account_error_hint()}"
-        return False, f"계좌 API 연결 실패: {e}{extra}"
+        return False, f"계좌 API 연결 실패: {e}{extra}", None
 
 
 def _fetch_token(server_url: str) -> str:
