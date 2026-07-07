@@ -22,10 +22,15 @@ def health():
     import crash_bounce
     import v_reversal
     warn = kis_api.validate_account_for_mode()
+    try:
+        orderable_cash = kis_api.get_orderable_cash()
+    except Exception:
+        orderable_cash = 0
     return jsonify({
         "ok": True,
         "kis_mode": os.getenv("KIS_MODE", "모의"),
         "account_warning": warn,
+        "orderable_cash": orderable_cash,
         "strategies": {
             "intraday_ai": os.getenv("ENABLE_INTRADAY_AI", "false").lower() == "true",
             "crash_bounce": crash_bounce.is_enabled(),

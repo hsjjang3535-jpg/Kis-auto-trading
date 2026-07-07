@@ -1205,8 +1205,10 @@ def main():
     print("=== KIS 자동매매 시작 (종산 장중매매) ===")
     _load_state()
 
-    acc_ok, acc_msg = kis_api.verify_trade_account()
+    acc_ok, acc_msg, orderable_cash = kis_api.verify_trade_account()
     print(f"[계좌 검증] {acc_msg}")
+    if orderable_cash is not None:
+        print(f"[예수금] 주문가능금액 {orderable_cash:,}원")
 
     # HTTP API 서버를 별도 스레드로 시작 (텔레그램 봇 연동)
     import api_server, threading
@@ -1229,9 +1231,15 @@ def main():
             f"{os.getenv('V_REVERSAL_ENTRY_END', '10:30')} / "
             f"한도 {v_reversal.MAX_AMOUNT:,}원"
         )
+    cash_line = (
+        f"💰 주문가능금액: {orderable_cash:,}원\n"
+        if orderable_cash is not None
+        else "💰 주문가능금액: 조회 실패\n"
+    )
     notifier.send(
         f"🤖 자동매매 봇 시작 (장중매매 + 종가베팅) - {now_kst}\n"
         f"{'✅' if acc_ok else '⚠️'} 계좌: {acc_msg}\n"
+        f"{cash_line}"
         "📌 장중매매: 09:05 스크리닝 → 09:10~14:30 진입 → 14:50 강제청산\n"
         f"   장중 AI: {'ON (Groq)' if ENABLE_INTRADAY_AI else 'OFF (기술조건만)'}\n"
         "🌙 종가베팅: 14:00 스크리닝 → 14:20~14:50 매수 → 익일 09:00 시초가 매도\n"
