@@ -54,8 +54,9 @@
 | `MAX_TOTAL_AMOUNT` | `1000000` | 장중 총 투자 한도 |
 | `MAX_BUY_AMOUNT` | `500000` | 장중 1회 매수 한도 |
 | `MAX_CLOSING_AMOUNT` | `500000` | 종가베팅 총 한도 |
-| `MAX_CLOSING_BUY` | `250000` | 종가베팅 1회 매수 |
-| `CLOSING_BET_MAX_PER_SLOT` | `2` | 5분 슬롯당 최대 매수 종목 |
+| `MAX_CLOSING_BUY` | `500000` | 종가베팅 1회 매수 |
+| `CLOSING_BET_MAX_PER_SLOT` | `1` | 5분 슬롯당 최대 매수 종목 |
+| `CLOSING_BET_MAX_POSITIONS` | `1` | 종가베팅 동시 보유 종목 수 |
 | `STOP_LOSS_PCT` | `2.0` | 손절 % |
 | `TAKE_PROFIT_PCT` | `3.0` | 트레일링 익절 시작 % |
 | `TRAILING_STOP_PCT` | `1.0` | 고점 대비 하락 % |

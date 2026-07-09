@@ -44,8 +44,9 @@ DYNAMIC_CAPITAL = os.getenv("DYNAMIC_CAPITAL", "true").lower() == "true"
 BUY_RATIO = float(os.getenv("BUY_RATIO", "0.5"))
 # 종가베팅 자금 한도 (별도 관리)
 MAX_CLOSING_AMOUNT = int(os.getenv("MAX_CLOSING_AMOUNT", "500000"))  # 종가베팅 총 한도
-MAX_CLOSING_BUY = int(os.getenv("MAX_CLOSING_BUY", "250000"))        # 종가베팅 1회 매수
-CLOSING_BET_MAX_PER_SLOT = int(os.getenv("CLOSING_BET_MAX_PER_SLOT", "2"))  # 5분 슬롯당 최대 매수 종목
+MAX_CLOSING_BUY = int(os.getenv("MAX_CLOSING_BUY", "500000"))        # 종가베팅 1회 매수
+CLOSING_BET_MAX_PER_SLOT = int(os.getenv("CLOSING_BET_MAX_PER_SLOT", "1"))  # 5분 슬롯당 최대 매수 종목
+CLOSING_BET_MAX_POSITIONS = int(os.getenv("CLOSING_BET_MAX_POSITIONS", "1"))  # 동시 보유 종목 수
 # 장중매매 AI (false=기술 통과만 워치리스트, 종가베팅 AI는 별도 유지)
 ENABLE_INTRADAY_AI = os.getenv("ENABLE_INTRADAY_AI", "false").lower() == "true"
 
@@ -758,6 +759,9 @@ def _check_closing_bet_entry() -> None:
 
     global _closing_invested_today
     global _closing_depleted_notified, _closing_balance_fail_notified
+    if len(_closing_positions) >= CLOSING_BET_MAX_POSITIONS:
+        return
+
     budget_remaining = MAX_CLOSING_AMOUNT - _closing_invested_today
     if budget_remaining <= 0:
         return
