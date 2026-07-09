@@ -145,6 +145,13 @@
 
 > 봇은 `KIS_MODE`가 바뀌면 저장된 모의 포지션 상태를 **자동으로 불러오지 않습니다** (실전/모의 혼선 방지).
 
+### 계좌번호가 안 바뀔 때
+
+1. **Redeploy** — Variables 저장만으로는 실행 중 컨테이너에 반영 안 될 수 있음 → **Deployments → Redeploy**
+2. **`KIS_CANO` / `KIS_ACNT_PRDT_CD`** — Railway에 이 변수가 있으면 예전에는 `KIS_ACCOUNT_NO`보다 **우선** 적용됨. 없으면 삭제, 있으면 `KIS_ACCOUNT_NO`와 **동일한 계좌**로 맞출 것
+3. **10자리 확인** — `6367728701` 형식 (8+2). 8자리만 넣으면 뒤 `01`이 자동 붙음
+4. **`/health` 확인** — `account.masked`, `account.source`가 바뀐 계좌인지 확인
+
 ---
 
 ## ✅ 설정 확인 체크리스트

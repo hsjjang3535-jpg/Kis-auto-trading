@@ -22,7 +22,6 @@ def _normalize_mode(raw: str) -> str:
 
 
 MODE = _normalize_mode(os.getenv("KIS_MODE", "모의"))
-ACCOUNT_NO = os.getenv("KIS_ACCOUNT_NO", "")
 
 # 시장 데이터(시세/차트)는 항상 실전 서버 사용 (VTS 서버는 시세 API 미지원)
 MARKET_URL = "https://openapi.koreainvestment.com:9443"
@@ -40,22 +39,42 @@ _last_trade_call = 0.0
 
 def get_account_parts() -> tuple[str, str]:
     """CANO(8자리), ACNT_PRDT_CD(2자리) 반환"""
+    raw = os.getenv("KIS_ACCOUNT_NO", "").strip().replace("-", "").replace(" ", "")
+    if raw:
+        if len(raw) >= 10:
+            return raw[:8], raw[8:10]
+        if len(raw) == 8:
+            prod = os.getenv("KIS_ACNT_PRDT_CD", "").strip() or "01"
+            return raw.zfill(8)[-8:], prod.zfill(2)[-2:]
+        raise ValueError(
+            f"계좌번호 형식 오류 ({raw}): 10자리(8+2) 또는 8자리+KIS_ACNT_PRDT_CD"
+        )
+
     cano = os.getenv("KIS_CANO", "").strip()
     prod = os.getenv("KIS_ACNT_PRDT_CD", "").strip()
     if cano and prod:
         return cano.zfill(8)[-8:], prod.zfill(2)[-2:]
 
-    raw = (ACCOUNT_NO or "").strip().replace("-", "").replace(" ", "")
-    if not raw:
-        raise ValueError("KIS_ACCOUNT_NO 또는 KIS_CANO/KIS_ACNT_PRDT_CD가 필요합니다")
+    raise ValueError("KIS_ACCOUNT_NO 또는 KIS_CANO/KIS_ACNT_PRDT_CD가 필요합니다")
 
-    if len(raw) >= 10:
-        return raw[:8], raw[8:10]
-    if len(raw) == 8:
-        return raw, prod or "01"
-    raise ValueError(
-        f"계좌번호 형식 오류 ({raw}): 10자리(8+2) 또는 8자리+KIS_ACNT_PRDT_CD"
-    )
+
+def get_account_info() -> dict:
+    """/health 등에서 실제 적용 계좌 확인용 (마스킹)"""
+    raw = os.getenv("KIS_ACCOUNT_NO", "").strip().replace("-", "").replace(" ", "")
+    cano_env = os.getenv("KIS_CANO", "").strip()
+    prod_env = os.getenv("KIS_ACNT_PRDT_CD", "").strip()
+    if raw:
+        source = "KIS_ACCOUNT_NO"
+    elif cano_env and prod_env:
+        source = "KIS_CANO+KIS_ACNT_PRDT_CD"
+    else:
+        source = "unset"
+
+    cano, prod = get_account_parts()
+    return {
+        "source": source,
+        "masked": f"{cano[:4]}****{prod}",
+    }
 
 
 def validate_account_for_mode() -> str | None:

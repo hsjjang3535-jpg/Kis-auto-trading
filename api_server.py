@@ -23,12 +23,17 @@ def health():
     import v_reversal
     warn = kis_api.validate_account_for_mode()
     try:
+        acct = kis_api.get_account_info()
+    except Exception as e:
+        acct = {"source": "error", "masked": None, "error": str(e)}
+    try:
         orderable_cash = kis_api.get_orderable_cash()
     except Exception:
         orderable_cash = 0
     return jsonify({
         "ok": True,
         "kis_mode": os.getenv("KIS_MODE", "모의"),
+        "account": acct,
         "account_warning": warn,
         "orderable_cash": orderable_cash,
         "strategies": {
