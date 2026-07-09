@@ -121,11 +121,89 @@ def _sort_watchlist_by_priority(stocks: list[dict], max_buy: int) -> list[dict]:
 
 
 def _closing_priority_score(stock: dict) -> float:
-    return _priority_score(stock, MAX_CLOSING_BUY)
+    """종가베팅 조건 부합도 (높을수록 우선 매수)
+
+    AI 강도 + 당일 상승률·거래량·RSI·MA5 위 안착도를 종가베팅 기준으로 가중.
+    """
+    strength = str(stock.get("strength") or "-")
+    score = float(_STRENGTH_SCORE.get(strength, 10))
+
+    try:
+        vol = float(stock.get("vol_ratio") or 0)
+    except (TypeError, ValueError):
+        vol = 0.0
+    # 거래량 1.5배(기본) 이상일수록 가점
+    score += min(max(vol - screener.VOL_RATIO_MIN, 0), 8.0) * 4.0
+
+    try:
+        rate = float(stock.get("change_rate") or 0)
+    except (TypeError, ValueError):
+        rate = 0.0
+    # 당일 상승률 여유 (과열 구간은 상한)
+    score += min(max(rate - screener.CLOSING_BET_MIN_RATE, 0), 12.0) * 2.5
+
+    try:
+        rsi = float(stock.get("rsi") or 50)
+    except (TypeError, ValueError):
+        rsi = 50.0
+    if 50 <= rsi <= 65:
+        score += 15.0
+    elif 40 <= rsi < 50 or 65 < rsi <= 72:
+        score += 8.0
+    elif rsi > 75:
+        score -= 10.0
+
+    try:
+        current = float(stock.get("current") or 0)
+        ma5 = float(stock.get("ma5") or 0)
+    except (TypeError, ValueError):
+        current, ma5 = 0.0, 0.0
+    if ma5 > 0 and current >= ma5:
+        gap = (current - ma5) / ma5 * 100
+        if 0.5 <= gap <= 6.0:
+            score += 12.0
+        elif gap <= 10.0:
+            score += 6.0
+
+    try:
+        price = float(stock.get("current") or 0)
+    except (TypeError, ValueError):
+        price = 0.0
+    if price > 0 and price <= MAX_CLOSING_BUY:
+        score += 5.0
+
+    return round(score, 2)
 
 
 def _sort_closing_watchlist(stocks: list[dict]) -> list[dict]:
-    return _sort_watchlist_by_priority(stocks, MAX_CLOSING_BUY)
+    """종가베팅 조건 부합도 내림차순 (동점: 등락률·거래량)"""
+    ranked = list(stocks)
+    for s in ranked:
+        s["priority_score"] = _closing_priority_score(s)
+    ranked.sort(
+        key=lambda x: (
+            x.get("priority_score", 0),
+            x.get("change_rate", 0),
+            x.get("vol_ratio", 0),
+        ),
+        reverse=True,
+    )
+    return ranked
+
+
+def _refresh_closing_watchlist_prices(stocks: list[dict]) -> list[dict]:
+    """매수 직전 현재가 반영 후 우선순위 재계산용"""
+    refreshed: list[dict] = []
+    for s in stocks:
+        item = dict(s)
+        try:
+            item["current"] = kis_api.get_current_price(
+                item["code"], fallback=item.get("current"),
+            )
+        except Exception as e:
+            print(f"[종가베팅] {item.get('name')} 현재가 갱신 실패: {e}")
+        refreshed.append(item)
+    return refreshed
 
 
 def _sort_intraday_watchlist(stocks: list[dict]) -> list[dict]:
@@ -400,8 +478,9 @@ def run_closing_bet_screening() -> None:
             ai_rejected = []
             for c in approved:
                 c.setdefault("reason", "AI 분석 불가 (기술적 조건 통과)")
+                c.setdefault("strength", "약")
 
-        # 잔액 부족 시 오를 가능성 높은 종목부터 매수되도록 우선순위 정렬
+        # 조건 부합도 높은 종목부터 매수 (1종목 보유 시 최우선 1개만 체결)
         approved = _sort_closing_watchlist(approved)
 
         _last_closing_summary = {
@@ -413,7 +492,7 @@ def run_closing_bet_screening() -> None:
         _closing_watchlist = approved
 
         if approved:
-            lines = [f"🌙 <b>종가베팅 워치리스트 {len(approved)}개</b> (우선순위순)\n"]
+            lines = [f"🌙 <b>종가베팅 워치리스트 {len(approved)}개</b> (조건 부합도순)\n"]
             for i, c in enumerate(approved, 1):
                 lines.append(
                     f"{i}. 🟣 {c['name']}({c['code']}) {c['change_rate']:+.1f}%\n"
@@ -791,14 +870,24 @@ def _check_closing_bet_entry() -> None:
 
     already_held = set(_closing_positions.keys())
     bought_this_slot = 0
-    # 매수 직전에도 우선순위 재정렬 (점수 높은 종목부터)
-    pending = _sort_closing_watchlist([
+    candidates = [
         s for s in _closing_watchlist
         if s["code"] not in already_held
         and s["code"] not in _closing_low_cash_skipped
-    ])
+    ]
+    if not candidates:
+        return
 
-    for stock in pending:
+    # 매수 직전 현재가 갱신 후 조건 부합도 재정렬 → 1위부터 시도
+    pending = _sort_closing_watchlist(_refresh_closing_watchlist_prices(candidates))
+    top = pending[0]
+    print(
+        f"[종가베팅] 매수 1순위: {top['name']}({top['code']}) "
+        f"점수 {top.get('priority_score', 0)} / "
+        f"{top.get('change_rate', 0):+.1f}% / 거래량 {top.get('vol_ratio', 0):.1f}x"
+    )
+
+    for rank, stock in enumerate(pending, 1):
         if bought_this_slot >= CLOSING_BET_MAX_PER_SLOT:
             break
         if remaining <= 0:
@@ -848,11 +937,16 @@ def _check_closing_bet_entry() -> None:
                     remaining = min(remaining, cash - invested)
                     cash = max(0, cash - invested)
                 bought_this_slot += 1
+                rank_note = f"우선순위 {rank}위 (점수 {stock.get('priority_score', 0)})"
                 notifier.notify_buy(
                     name, code, quantity, int(current),
-                    f"[종가베팅] {stock.get('reason', '')}",
+                    f"[종가베팅] {rank_note} · {stock.get('reason', '')}",
                 )
-                print(f"[종가베팅] 매수 {name}({code}) {quantity}주 @ {int(current):,}")
+                print(
+                    f"[종가베팅] 매수 {name}({code}) {quantity}주 @ {int(current):,} "
+                    f"({rank_note})"
+                )
+                break  # 1종목 보유 — 체결 후 추가 시도 없음
             else:
                 msg = result.get("msg1", "알 수 없는 오류")
                 notifier.notify_error(f"{name} 종가베팅 매수 실패: {msg}")
