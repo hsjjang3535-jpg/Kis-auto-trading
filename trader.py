@@ -445,8 +445,15 @@ def run_closing_bet_screening() -> None:
         return
 
     global _closing_watchlist, _last_closing_summary
+    is_friday = datetime.now(KST).weekday() == 4
     print(f"\n[{datetime.now(KST).strftime('%H:%M:%S')} KST] 종가베팅 스크리닝 시작")
-    notifier.send("⏰ 오후 2시 - 종가베팅 후보 스크리닝 시작")
+    if is_friday:
+        notifier.send(
+            "⏰ 오후 2시 - 종가베팅 스크리닝 시작\n"
+            "📅 <b>금요일 모드</b> — 뉴스 호재가 주말~월요일까지 이어질 종목 중심"
+        )
+    else:
+        notifier.send("⏰ 오후 2시 - 종가베팅 후보 스크리닝 시작")
 
     try:
         candidates = screener.screen_closing_bet_candidates(top_n=20)
@@ -459,10 +466,13 @@ def run_closing_bet_screening() -> None:
                 c["name"], c["code"], c["change_rate"],
                 rsi=c.get("rsi"), vol_ratio=c.get("vol_ratio"),
                 current=c.get("current"), ma5=c.get("ma5"),
+                friday_weekend=is_friday,
             )
-            c["buy"] = ai_analyzer.is_approved(result)
+            c["buy"] = ai_analyzer.is_closing_approved(result, friday_weekend=is_friday)
             c["strength"] = result["strength"]
             c["reason"] = result["reason"]
+            if is_friday:
+                c["friday_mode"] = True
             if result["reason"] == "분석 실패":
                 ai_fail_count += 1
             if c["buy"]:
@@ -474,11 +484,18 @@ def run_closing_bet_screening() -> None:
             time.sleep(2)
 
         if candidates and ai_fail_count == len(candidates):
-            approved = candidates
-            ai_rejected = []
-            for c in approved:
-                c.setdefault("reason", "AI 분석 불가 (기술적 조건 통과)")
-                c.setdefault("strength", "약")
+            if is_friday:
+                notifier.send(
+                    "⚠️ 금요일 AI 분석 불가 — 주말 호재 검토 없이 종가베팅을 진행하지 않습니다."
+                )
+                approved = []
+                ai_rejected = []
+            else:
+                approved = candidates
+                ai_rejected = []
+                for c in approved:
+                    c.setdefault("reason", "AI 분석 불가 (기술적 조건 통과)")
+                    c.setdefault("strength", "약")
 
         # 조건 부합도 높은 종목부터 매수 (1종목 보유 시 최우선 1개만 체결)
         approved = _sort_closing_watchlist(approved)
@@ -488,11 +505,13 @@ def run_closing_bet_screening() -> None:
             "candidates": len(candidates),
             "approved": len(approved),
             "ai_rejected": ai_rejected,
+            "friday_mode": is_friday,
         }
         _closing_watchlist = approved
 
         if approved:
-            lines = [f"🌙 <b>종가베팅 워치리스트 {len(approved)}개</b> (조건 부합도순)\n"]
+            mode_note = " (금요일·주말호재)" if is_friday else ""
+            lines = [f"🌙 <b>종가베팅 워치리스트 {len(approved)}개</b>{mode_note} (조건 부합도순)\n"]
             for i, c in enumerate(approved, 1):
                 lines.append(
                     f"{i}. 🟣 {c['name']}({c['code']}) {c['change_rate']:+.1f}%\n"

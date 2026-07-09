@@ -19,7 +19,7 @@ _MODELS = [
 _APPROVE_STRENGTHS = ("강", "중", "약")
 
 
-def fetch_news(stock_name: str) -> str:
+def fetch_news(stock_name: str, display: int = 5) -> str:
     """네이버 금융 뉴스 검색"""
     try:
         url = "https://openapi.naver.com/v1/search/news.json"
@@ -27,7 +27,7 @@ def fetch_news(stock_name: str) -> str:
             "X-Naver-Client-Id": os.getenv("NAVER_CLIENT_ID", ""),
             "X-Naver-Client-Secret": os.getenv("NAVER_CLIENT_SECRET", ""),
         }
-        params = {"query": stock_name, "display": 5, "sort": "date"}
+        params = {"query": stock_name, "display": display, "sort": "date"}
         res = requests.get(url, headers=headers, params=params, timeout=5)
         if res.status_code == 200:
             items = res.json().get("items", [])
@@ -47,6 +47,15 @@ def is_approved(result: dict) -> bool:
     if result.get("buy") is True:
         return True
     return result.get("strength") in _APPROVE_STRENGTHS
+
+
+def is_closing_approved(result: dict, friday_weekend: bool = False) -> bool:
+    """종가베팅 워치리스트 통과 여부 (금요일은 주말 호재 기준 강화)"""
+    if result.get("reason") == "분석 실패":
+        return False
+    if friday_weekend:
+        return result.get("buy") is True and result.get("strength") in ("강", "중")
+    return is_approved(result)
 
 
 def _format_technical_context(ctx: dict) -> str:
@@ -151,9 +160,14 @@ def analyze_closing_bet(
     vol_ratio: float | None = None,
     current: float | None = None,
     ma5: float | None = None,
+    friday_weekend: bool = False,
 ) -> dict:
-    """종가베팅 AI 분석 - 오버나이트 보유 적합성 (완화 기준)"""
-    news = fetch_news(stock_name)
+    """종가베팅 AI 분석 - 오버나이트 보유 적합성 (완화 기준)
+
+    friday_weekend=True(금요일): 뉴스 기반 주말~월요일 호재 지속 가능성 중심 분석.
+    """
+    news_count = 8 if friday_weekend else 5
+    news = fetch_news(stock_name, display=news_count)
     tech = _format_technical_context({
         "strategy": "종가베팅",
         "change_rate": change_rate,
@@ -163,7 +177,41 @@ def analyze_closing_bet(
         "ma5": ma5,
     })
 
-    prompt = f"""
+    if friday_weekend:
+        prompt = f"""
+당신은 한국 주식 단기매매 전문가입니다. **금요일 종가베팅** 관점에서 아래 종목을 분석해주세요.
+보유 기간: 금요일 장 마감 매수 → **주말 2일 + 월요일 시초가** 매도 (총 3일 오버나이트).
+
+종목명: {stock_name} ({code})
+기술적 스크리닝 결과 (이미 통과한 종목):
+{tech}
+관련 뉴스 (최근 {news_count}건):
+{news}
+
+[금요일 전용 기준 - 중요]
+- 반드시 **뉴스·공시·테마 호재**를 검토하세요. 주말 동안 이어질 수 있는 재료가 핵심입니다.
+- buy: true는 아래 중 하나 이상일 때만:
+  1) 뉴스에 계약·수주·실적·정책·테마 등 **주말~월요일까지 이어질 호재**가 있음
+  2) 당일 강한 수급 + 뉴스가 악재가 아니며, 월요일 갭업 기대가 합리적임
+- buy: false는 아래 경우:
+  1) 뉴스 없이 차트만 오른 종목 (주말 변동성·갭 하락 위험)
+  2) 금요일 차익 실현·단기 급등 후 피로 신호 (RSI 72↑ 등)
+  3) 주말 악재 우려 (조사, 유상증자, 실적 쇼크, 대주주 매도 등)
+  4) 호재가 이미 소멸·반영 완료된 뉴스
+
+strength 기준:
+- 강=뉴스 호재가 주말·월요일까지 이어질 가능성 높음
+- 중=호재는 약하지만 수급·테마 지속 기대
+- 약=뉴스 근거 부족 (금요일에는 워치리스트 통과 비권장)
+- 없음=오버나이트 부적합
+
+reason에는 **어떤 뉴스/호재**를 근거로 판단했는지 한 줄에 포함하세요.
+
+반드시 아래 JSON 형식으로만 답하세요:
+{{"buy": true/false, "strength": "강/중/약/없음", "reason": "한 줄 요약"}}
+"""
+    else:
+        prompt = f"""
 당신은 한국 주식 단기매매 전문가입니다. 종가베팅(장 마감 직전 매수, 다음날 시초가 매도) 관점에서 아래 종목을 분석해주세요.
 
 종목명: {stock_name} ({code})
