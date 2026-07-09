@@ -27,6 +27,9 @@
 > **모의투자:** `KIS_APP_KEY`는 **모의투자용** 앱키, `KIS_ACCOUNT_NO`는 **모의 계좌**(보통 `50xxxxxxxx`)여야 합니다.  
 > 실계좌번호를 넣으면 `인증 시점의 계좌번호와 요청 계좌번호가 일치하지 않습니다` 오류가 납니다.
 
+> **실전투자:** `KIS_APP_KEY`는 **실전투자용** 앱키, `KIS_ACCOUNT_NO`는 **실계좌**(50으로 시작하지 않음)여야 합니다.  
+> 모의 앱키·모의 계좌를 그대로 두고 `KIS_MODE=실전`만 바꾸면 **주문이 되지 않습니다.**
+
 > `API_SECRET`은 **telegram-gemini-bot (trading)** 의 `API_SECRET`과 **동일**해야 합니다.
 
 ---
@@ -105,12 +108,63 @@
 
 ---
 
+## 🚀 모의 → 실전 전환 (설정 그대로 유지)
+
+매매 규칙·스크리너·한도 Variables는 **그대로 두고**, 아래 **4개만** 바꿉니다.
+
+| Variable | 변경 내용 |
+|----------|-----------|
+| `KIS_MODE` | `모의` → **`실전`** |
+| `KIS_APP_KEY` | KIS Developers → **실전투자** 앱키로 교체 |
+| `KIS_APP_SECRET` | 실전 앱시크릿으로 교체 |
+| `KIS_ACCOUNT_NO` | **실계좌** 10자리 (하이픈 없이, 예: `6367728701`) |
+
+### 그대로 유지해도 되는 것 (예시)
+
+- `MAX_TOTAL_AMOUNT`, `MAX_BUY_AMOUNT`, `MAX_CLOSING_AMOUNT`, `MAX_CLOSING_BUY`
+- `ENABLE_INTRADAY_AI`, `ENABLE_CRASH_BOUNCE`, `ENABLE_V_REVERSAL`
+- `STOP_LOSS_PCT`, `TAKE_PROFIT_PCT`, `DYNAMIC_CAPITAL`, `BUY_RATIO`
+- `TELEGRAM_*`, `GROQ_API_KEY`, `API_SECRET`
+
+### 실전 전환 시 달라지는 동작
+
+| 항목 | 모의 | 실전 |
+|------|------|------|
+| 주문 서버 | VTS (`openapivts...`) | 실전 (`openapi...`) |
+| 낙폭반등 | `ENABLE_CRASH_BOUNCE=true`여도 **자동 OFF** | 설정값대로 **실제 동작** |
+| API 호출 간격 | 1초 (초당 2건 제한) | 0.05초 |
+| 체결 | 가상 | **실제 돈** |
+
+### 전환 전 체크
+
+1. **모의 계좌 잔여 포지션** (데이터솔루션, 종가베팅 오버나이트 등)은 모의 계좌에서 **별도 정리** (실전과 무관)
+2. KIS 앱/HTS에서 **실전 계좌 예수금** 확인 — `DYNAMIC_CAPITAL=true`면 예수금 기준으로 한도 자동 조절
+3. Railway Variables 4개 변경 후 **Redeploy**
+4. 텔레그램 시작 메시지: `📍 모드: 실전` + `✅ 계좌 연결 OK` 확인
+5. `/health` → `"kis_mode": "실전"`, `account_warning: null`, `orderable_cash` 확인
+
+> 봇은 `KIS_MODE`가 바뀌면 저장된 모의 포지션 상태를 **자동으로 불러오지 않습니다** (실전/모의 혼선 방지).
+
+---
+
 ## ✅ 설정 확인 체크리스트
 
 복구·재배포 후 아래를 확인하세요.
 
+### 모의투자
+
 - [ ] `KIS_APP_KEY` / `SECRET` = **모의투자** 포털에서 발급한 키
 - [ ] `KIS_MODE` = `모의`
+- [ ] `KIS_ACCOUNT_NO` = `50xxxxxxxx` 형식
+
+### 실전투자
+
+- [ ] `KIS_APP_KEY` / `SECRET` = **실전투자** 포털에서 발급한 키
+- [ ] `KIS_MODE` = `실전`
+- [ ] `KIS_ACCOUNT_NO` = 실계좌 (50으로 시작하지 않음)
+
+### 공통
+
 - [ ] `TZ` = `Asia/Seoul`
 - [ ] `ENABLE_CRASH_BOUNCE` = `true`
 - [ ] `API_SECRET` = 텔레그램 trading 서비스와 **동일**

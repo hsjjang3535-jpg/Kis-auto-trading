@@ -162,6 +162,10 @@ _closing_positions: dict[str, dict] = {}
 
 # 오늘 종가베팅 투자금
 _closing_invested_today: int = 0
+_closing_low_cash_notified: set[str] = set()   # 금액 부족 알림 (종목당 1회)
+_closing_low_cash_skipped: set[str] = set()     # 금액 부족 종목 재시도 스킵
+_closing_depleted_notified: bool = False        # 주문가능금액 0 알림 (1회)
+_closing_balance_fail_notified: bool = False    # 예수금 조회 실패 알림 (1회)
 
 # 오늘 체결된 매도 기록 (장중 + 종가베팅 모두 포함, 손익 보고용)
 # { name, code, quantity, buy_price, sell_price, profit_pct, profit_won, reason, strategy }
@@ -180,6 +184,7 @@ def _today_kst() -> str:
 
 def _save_state() -> None:
     state = {
+        "kis_mode": os.getenv("KIS_MODE", "모의"),
         "date": _today_kst(),
         "positions": _positions,
         "total_invested_today": _total_invested_today,
@@ -205,6 +210,15 @@ def _load_state() -> None:
     try:
         with open(_STATE_FILE, "r", encoding="utf-8") as f:
             state = json.load(f)
+
+        current_mode = os.getenv("KIS_MODE", "모의")
+        saved_mode = state.get("kis_mode")
+        if saved_mode and saved_mode != current_mode:
+            print(
+                f"[상태 초기화] KIS_MODE 변경 ({saved_mode} → {current_mode}) — "
+                "모의/실전 포지션 상태를 불러오지 않습니다"
+            )
+            return
 
         # 종가베팅 포지션은 날짜와 무관하게 항상 불러옴 (오버나이트 포지션)
         _closing_positions = state.get("closing_positions", {})
@@ -743,24 +757,33 @@ def _check_closing_bet_entry() -> None:
         return
 
     global _closing_invested_today
+    global _closing_depleted_notified, _closing_balance_fail_notified
     budget_remaining = MAX_CLOSING_AMOUNT - _closing_invested_today
     if budget_remaining <= 0:
         return
 
+    cash: int | None = None
     try:
         cash = kis_api.get_orderable_cash()
     except Exception as e:
         print(f"[종가베팅] 예수금 조회 실패: {e}")
-        notifier.notify_error(f"종가베팅 예수금 조회 실패 — 매수 중단: {e}")
-        return
-
-    remaining = min(budget_remaining, cash)
-    if remaining <= 0:
-        notifier.send(
-            f"⚠️ 종가베팅 매수 불가 — 주문가능금액 {cash:,}원 "
-            f"(한도 {budget_remaining:,}원)"
-        )
-        return
+        if not _closing_balance_fail_notified:
+            _closing_balance_fail_notified = True
+            notifier.send(
+                f"⚠️ 종가베팅 예수금 조회 실패 — 잔여 한도 기준으로 진행\n"
+                f"사유: {e}"
+            )
+        remaining = budget_remaining
+    else:
+        remaining = min(budget_remaining, cash)
+        if remaining <= 0:
+            if not _closing_depleted_notified:
+                _closing_depleted_notified = True
+                notifier.send(
+                    f"⚠️ 종가베팅 매수 불가 — 주문가능금액 {cash:,}원 "
+                    f"(한도 {budget_remaining:,}원)"
+                )
+            return
 
     already_held = set(_closing_positions.keys())
     bought_this_slot = 0
@@ -768,6 +791,7 @@ def _check_closing_bet_entry() -> None:
     pending = _sort_closing_watchlist([
         s for s in _closing_watchlist
         if s["code"] not in already_held
+        and s["code"] not in _closing_low_cash_skipped
     ])
 
     for stock in pending:
@@ -787,15 +811,18 @@ def _check_closing_bet_entry() -> None:
             buy_amount = min(MAX_CLOSING_BUY, remaining)
             quantity = buy_amount // int(current)
             if quantity < 1:
-                # 잔액으로 살 수 없으면 다음 우선순위 종목으로 넘어감
+                # 잔액으로 살 수 없으면 다음 우선순위 종목으로 넘어감 (알림·재시도 각 1회)
+                _closing_low_cash_skipped.add(code)
                 print(
                     f"[종가베팅] {name} 금액 부족 "
                     f"(현재가 {int(current):,}원 / 잔여 {remaining:,}원) → 다음 후보"
                 )
-                notifier.send(
-                    f"⚠️ {name}: 종가베팅 금액 부족 "
-                    f"(현재가 {int(current):,}원) → 다음 우선순위 종목으로 진행"
-                )
+                if code not in _closing_low_cash_notified:
+                    _closing_low_cash_notified.add(code)
+                    notifier.send(
+                        f"⚠️ {name}: 종가베팅 금액 부족 "
+                        f"(현재가 {int(current):,}원) → 다음 우선순위 종목으로 진행"
+                    )
                 continue
 
             result = kis_api.buy_stock(code, quantity)
@@ -812,11 +839,10 @@ def _check_closing_bet_entry() -> None:
                 }
                 _save_state()
                 already_held.add(code)
-                remaining = min(
-                    MAX_CLOSING_AMOUNT - _closing_invested_today,
-                    cash - invested,
-                )
-                cash = max(0, cash - invested)
+                remaining = MAX_CLOSING_AMOUNT - _closing_invested_today
+                if cash is not None:
+                    remaining = min(remaining, cash - invested)
+                    cash = max(0, cash - invested)
                 bought_this_slot += 1
                 notifier.notify_buy(
                     name, code, quantity, int(current),
@@ -852,9 +878,10 @@ def _execute_closing_sell(code: str, pos: dict, reason: str) -> None:
     quantity = pos["quantity"]
 
     try:
-        info = kis_api.get_stock_info(code)
-        current = float(info.get("stck_prpr", pos["buy_price"]))
-        profit_pct = (current - pos["buy_price"]) / pos["buy_price"] * 100
+        current, profit_pct, price_fallback = _sell_reference_price(code, pos["buy_price"])
+        sell_reason = reason
+        if price_fallback:
+            sell_reason = f"{reason} (현재가 조회 실패, 손익은 매수가 기준)"
 
         result = kis_api.sell_stock(code, quantity)
         if result.get("rt_cd") == "0":
@@ -867,13 +894,13 @@ def _execute_closing_sell(code: str, pos: dict, reason: str) -> None:
                 "sell_price": int(current),
                 "profit_pct": round(profit_pct, 2),
                 "profit_won": profit_won,
-                "sell_reason": reason,
+                "sell_reason": sell_reason,
                 "buy_reason": pos.get("buy_reason", ""),
                 "strategy": "종가베팅",
             })
             del _closing_positions[code]
             _save_state()
-            notifier.notify_sell(name, code, quantity, profit_pct, reason)
+            notifier.notify_sell(name, code, quantity, profit_pct, sell_reason)
         else:
             msg = result.get("msg1", "알 수 없는 오류")
             notifier.notify_error(f"{name} 종가베팅 매도 실패: {msg}")
@@ -1246,20 +1273,34 @@ def _check_exit() -> None:
             print(f"[청산 체크 오류] {pos['name']}: {e}")
 
 
+def _sell_reference_price(code: str, buy_price: float) -> tuple[float, float, bool]:
+    """매도 손익 계산용 가격. 조회 실패 시 매수가 fallback (시장가 매도는 계속 진행)."""
+    try:
+        info = kis_api.get_stock_info(code)
+        current = float(info.get("stck_prpr", 0))
+        if current > 0:
+            profit_pct = (current - buy_price) / buy_price * 100
+            return current, profit_pct, False
+    except Exception as e:
+        print(f"[매도] {code} 현재가 조회 실패, 시장가 매도 진행: {e}")
+    return float(buy_price), 0.0, True
+
+
 def _execute_sell(code: str, pos: dict, reason: str,
                   current: float = 0, profit_pct: float = 0) -> None:
     name = pos["name"]
     quantity = pos["quantity"]
+    price_fallback = False
 
     try:
-        # 현재가가 전달되지 않은 경우 (강제청산 등)에만 재조회
         if current == 0:
-            info = kis_api.get_stock_info(code)
-            current = float(info.get("stck_prpr", pos["buy_price"]))
-            profit_pct = (current - pos["buy_price"]) / pos["buy_price"] * 100
+            current, profit_pct, price_fallback = _sell_reference_price(code, pos["buy_price"])
 
         result = kis_api.sell_stock(code, quantity)
         if result.get("rt_cd") == "0":
+            sell_reason = reason
+            if price_fallback:
+                sell_reason = f"{reason} (현재가 조회 실패, 손익은 매수가 기준)"
             profit_won = int((current - pos["buy_price"]) * quantity)
             _trades_today.append({
                 "name": name,
@@ -1269,13 +1310,13 @@ def _execute_sell(code: str, pos: dict, reason: str,
                 "sell_price": int(current),
                 "profit_pct": round(profit_pct, 2),
                 "profit_won": profit_won,
-                "sell_reason": reason,
+                "sell_reason": sell_reason,
                 "buy_reason": pos.get("buy_reason", ""),
                 "strategy": pos.get("strategy", ""),
             })
             del _positions[code]
             _save_state()
-            notifier.notify_sell(name, code, quantity, profit_pct, reason)
+            notifier.notify_sell(name, code, quantity, profit_pct, sell_reason)
         else:
             msg = result.get("msg1", "알 수 없는 오류")
             notifier.notify_error(f"{name} 매도 실패: {msg}")
@@ -1293,6 +1334,8 @@ def _reset_daily_state() -> None:
     global _watchlist, _closing_watchlist, _trades_today
     global _total_invested_today, _closing_invested_today, _crash_bounce_invested_today
     global _v_reversal_invested_today
+    global _closing_low_cash_notified, _closing_low_cash_skipped
+    global _closing_depleted_notified, _closing_balance_fail_notified
     _watchlist = []
     _closing_watchlist = []
     _trades_today = []
@@ -1300,6 +1343,10 @@ def _reset_daily_state() -> None:
     _closing_invested_today = 0
     _crash_bounce_invested_today = 0
     _v_reversal_invested_today = 0
+    _closing_low_cash_notified = set()
+    _closing_low_cash_skipped = set()
+    _closing_depleted_notified = False
+    _closing_balance_fail_notified = False
     # _closing_positions는 초기화 안 함 - 오버나이트 포지션 유지
     _save_state()
     print(f"[일별 초기화] {_today_kst()} 새 거래일 시작")
@@ -1344,6 +1391,7 @@ def main():
     )
     notifier.send(
         f"🤖 자동매매 봇 시작 (장중매매 + 종가베팅) - {now_kst}\n"
+        f"📍 모드: {os.getenv('KIS_MODE', '모의')}\n"
         f"{'✅' if acc_ok else '⚠️'} 계좌: {acc_msg}\n"
         f"{cash_line}"
         "📌 장중매매: 09:05 스크리닝 → 09:10~14:30 진입 → 14:50 강제청산\n"

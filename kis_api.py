@@ -60,13 +60,22 @@ def get_account_parts() -> tuple[str, str]:
 
 def validate_account_for_mode() -> str | None:
     """모의/실전과 계좌번호 불일치 시 안내 문구 반환"""
-    if MODE == "실전":
-        return None
     try:
         cano, prod = get_account_parts()
     except ValueError as e:
         return str(e)
-    if cano.startswith(("50", "4444", "00")):
+
+    is_paper_account = cano.startswith(("50", "4444", "00"))
+
+    if MODE == "실전":
+        if is_paper_account:
+            return (
+                f"KIS_MODE=실전인데 KIS_ACCOUNT_NO({cano}{prod})가 모의 계좌로 보입니다. "
+                "KIS Developers → 실전투자 앱키와 실계좌번호를 Railway Variables에 설정하세요."
+            )
+        return None
+
+    if is_paper_account:
         return None
     if len(cano) == 8:
         return (
@@ -100,6 +109,8 @@ def account_error_hint() -> str:
 def verify_trade_account() -> tuple[bool, str, int | None]:
     """시작 시 주문/잔고 API 연결 검증. (성공여부, 메시지, 주문가능금액)"""
     warn = validate_account_for_mode()
+    if warn and MODE == "실전":
+        return False, warn, None
     try:
         cano, prod = get_account_parts()
         cash = get_orderable_cash()
@@ -734,49 +745,68 @@ def get_cash_balance() -> int:
     return get_orderable_cash()
 
 
-def get_orderable_cash() -> int:
-    """주문 가능 현금 (매수가능금액 우선)"""
+def get_orderable_cash(retries: int = 3) -> int:
+    """주문 가능 현금 (매수가능금액 우선, 타임아웃·5xx 재시도)"""
     acc_no, acc_prod = get_account_parts()
     tr_id = "TTTC8434R" if MODE == "실전" else "VTTC8434R"
+    params = {
+        "CANO": acc_no,
+        "ACNT_PRDT_CD": acc_prod,
+        "AFHR_FLPR_YN": "N",
+        "OFL_YN": "",
+        "INQR_DVSN": "02",
+        "UNPR_DVSN": "01",
+        "FUND_STTL_ICLD_YN": "N",
+        "FNCG_AMT_AUTO_RDPT_YN": "N",
+        "PRCS_DVSN": "01",
+        "CTX_AREA_FK100": "",
+        "CTX_AREA_NK100": "",
+    }
+    path = "/uapi/domestic-stock/v1/trading/inquire-balance"
+    last_err: Exception | None = None
 
-    _trade_throttle()
-    res = requests.get(
-        f"{TRADE_URL}/uapi/domestic-stock/v1/trading/inquire-balance",
-        headers=_trade_headers(tr_id),
-        timeout=10,
-        params={
-            "CANO": acc_no,
-            "ACNT_PRDT_CD": acc_prod,
-            "AFHR_FLPR_YN": "N",
-            "OFL_YN": "",
-            "INQR_DVSN": "02",
-            "UNPR_DVSN": "01",
-            "FUND_STTL_ICLD_YN": "N",
-            "FNCG_AMT_AUTO_RDPT_YN": "N",
-            "PRCS_DVSN": "01",
-            "CTX_AREA_FK100": "",
-            "CTX_AREA_NK100": "",
-        },
-    )
-    res.raise_for_status()
-    data = res.json()
-    if data.get("rt_cd") not in (None, "0"):
-        msg_cd = data.get("msg_cd", "")
-        msg1 = data.get("msg1", "알 수 없는 오류")
-        detail = f"{msg_cd}: {msg1}" if msg_cd else msg1
-        err = RuntimeError(f"KIS 잔고 조회 오류: {detail}")
-        if is_account_error(err):
-            raise RuntimeError(f"{detail}\n{account_error_hint()}") from err
-        raise err
-    summary = data.get("output2", [{}])
-    if isinstance(summary, list):
-        summary = summary[0] if summary else {}
-
-    for key in ("ord_psbl_cash", "nrcvb_buy_amt", "dnca_tot_amt"):
+    for attempt in range(retries):
+        _trade_throttle()
         try:
-            val = int(summary.get(key, "0") or "0")
-        except (ValueError, TypeError):
-            val = 0
-        if val > 0:
-            return val
-    return 0
+            res = requests.get(
+                f"{TRADE_URL}{path}",
+                headers=_trade_headers(tr_id),
+                timeout=15,
+                params=params,
+            )
+            if res.status_code in (500, 502, 503, 504):
+                raise requests.HTTPError(
+                    f"{res.status_code} Server Error: {res.reason} for url: {res.url}",
+                    response=res,
+                )
+            res.raise_for_status()
+            data = res.json()
+            if data.get("rt_cd") not in (None, "0"):
+                msg_cd = data.get("msg_cd", "")
+                msg1 = data.get("msg1", "알 수 없는 오류")
+                detail = f"{msg_cd}: {msg1}" if msg_cd else msg1
+                err = RuntimeError(f"KIS 잔고 조회 오류: {detail}")
+                if is_account_error(err):
+                    raise RuntimeError(f"{detail}\n{account_error_hint()}") from err
+                raise err
+            summary = data.get("output2", [{}])
+            if isinstance(summary, list):
+                summary = summary[0] if summary else {}
+
+            for key in ("ord_psbl_cash", "nrcvb_buy_amt", "dnca_tot_amt"):
+                try:
+                    val = int(summary.get(key, "0") or "0")
+                except (ValueError, TypeError):
+                    val = 0
+                if val > 0:
+                    return val
+            return 0
+        except Exception as e:
+            last_err = e
+            if attempt < retries - 1:
+                wait = 1 + attempt
+                print(f"[KIS 예수금 재시도] ({attempt + 1}/{retries}) {e} → {wait}초 후")
+                time.sleep(wait)
+                continue
+            break
+    raise last_err or RuntimeError("KIS 예수금 조회 실패")
