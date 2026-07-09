@@ -167,6 +167,9 @@ _closing_invested_today: int = 0
 # { name, code, quantity, buy_price, sell_price, profit_pct, profit_won, reason, strategy }
 _trades_today: list[dict] = []
 
+# 오늘 09:00 종가베팅 시초가 매도 처리 로그 (11시 상태 보고용)
+_morning_closing_log: list[dict] = []
+
 # 오늘 스크리닝 요약 (0개일 때 이유 보고용)
 _last_morning_summary: dict = {}
 _last_closing_summary: dict = {}
@@ -186,6 +189,7 @@ def _save_state() -> None:
         "crash_bounce_invested_today": _crash_bounce_invested_today,
         "v_reversal_invested_today": _v_reversal_invested_today,
         "trades_today": _trades_today,
+        "morning_closing_log": _morning_closing_log,
         "closing_positions": _closing_positions,       # 오버나이트 유지
         "closing_invested_today": _closing_invested_today,
     }
@@ -197,7 +201,7 @@ def _save_state() -> None:
 
 
 def _load_state() -> None:
-    global _positions, _total_invested_today, _trades_today
+    global _positions, _total_invested_today, _trades_today, _morning_closing_log
     global _closing_positions, _closing_invested_today, _crash_bounce_invested_today
     global _v_reversal_invested_today
     if not os.path.exists(_STATE_FILE):
@@ -218,6 +222,7 @@ def _load_state() -> None:
             _crash_bounce_invested_today = state.get("crash_bounce_invested_today", 0)
             _v_reversal_invested_today = state.get("v_reversal_invested_today", 0)
             _trades_today = state.get("trades_today", [])
+            _morning_closing_log = state.get("morning_closing_log", [])
             _closing_invested_today = state.get("closing_invested_today", 0)
             if _positions:
                 print(f"[상태 복원] 장중 포지션 {len(_positions)}개 불러옴")
@@ -337,13 +342,19 @@ def run_morning_sell_closing_bet() -> None:
     if not _closing_positions:
         return
 
+    global _morning_closing_log
+    _morning_closing_log = []
+
     count = len(_closing_positions)
     print(f"\n[{datetime.now(KST).strftime('%H:%M:%S')} KST] 종가베팅 시초가 매도 ({count}개)")
     notifier.send(f"🌅 09:00 - 종가베팅 포지션 {count}개 시초가 매도 시작")
 
     for code, pos in list(_closing_positions.items()):
-        _execute_closing_sell(code, pos, "종가베팅 시초가 매도")
+        result = _execute_closing_sell(code, pos, "종가베팅 시초가 매도")
+        _morning_closing_log.append(result)
         time.sleep(0.5)
+
+    _save_state()
 
 
 def run_closing_bet_screening() -> None:
@@ -541,6 +552,98 @@ def run_market_check() -> None:
         _check_entry()
 
 
+def _resolve_report_price(
+    code: str, pos: dict, price_map: dict[str, float],
+) -> tuple[float, str]:
+    """상태 보고용 가격 (잔고 → 시세 API → 매수가 순)"""
+    buy = float(pos.get("buy_price") or 0)
+    if code in price_map:
+        return price_map[code], ""
+    try:
+        return kis_api.get_current_price(code, fallback=buy if buy > 0 else None), ""
+    except Exception as e:
+        print(f"[상태보고 시세] {code}({pos.get('name')}): {e}")
+        if buy > 0:
+            return buy, " (매수가 기준)"
+        return 0.0, " (시세 조회 불가)"
+
+
+def _format_position_report_line(
+    code: str,
+    pos: dict,
+    price_map: dict[str, float],
+    *,
+    prefix: str = "",
+    extra: str = "",
+) -> str:
+    """보유 종목 한 줄 포맷"""
+    name = pos.get("name", code)
+    qty = pos.get("quantity", 0)
+    buy = float(pos.get("buy_price") or 0)
+    strategy = pos.get("strategy", "")
+
+    current, note = _resolve_report_price(code, pos, price_map)
+    if current <= 0:
+        return f"  {prefix}{name}: {qty}주 @ {int(buy):,}원{note}"
+
+    profit_pct = (current - buy) / buy * 100 if buy else 0.0
+    line = (
+        f"  {prefix}{name}: {profit_pct:+.1f}% | "
+        f"{qty}주 @ {int(buy):,}원 → {int(current):,}원"
+    )
+    if strategy:
+        line += f" ({strategy})"
+    if extra:
+        line += f" {extra}"
+    line += note
+    return line
+
+
+def _format_overnight_closing_lines() -> list[str]:
+    """어제 종가베팅 → 오늘 아침 매도/보유 상태"""
+    morning_sells = [t for t in _trades_today if t.get("strategy") == "종가베팅"]
+    if not morning_sells and not _closing_positions and not _morning_closing_log:
+        return []
+
+    lines = ["🌙 어제 종가베팅 처리:"]
+    shown_codes: set[str] = set()
+
+    for t in morning_sells:
+        code = t.get("code", "")
+        lines.append(
+            f"  ✅ {t['name']}: 매도완료 {t['profit_pct']:+.1f}% "
+            f"({t['quantity']}주, {t.get('sell_reason', '시초가 매도')})"
+        )
+        if code:
+            shown_codes.add(code)
+
+    for entry in _morning_closing_log:
+        code = entry.get("code", "")
+        if code and code in shown_codes:
+            continue
+        if entry.get("status") == "sold":
+            lines.append(
+                f"  ✅ {entry['name']}: 매도완료 {entry.get('profit_pct', 0):+.1f}% "
+                f"({entry.get('quantity', 0)}주)"
+            )
+        elif entry.get("status") == "failed":
+            lines.append(
+                f"  ❌ {entry['name']}: 매도실패 — {entry.get('error', '알 수 없음')}"
+            )
+        if code:
+            shown_codes.add(code)
+
+    for code, pos in _closing_positions.items():
+        if code in shown_codes:
+            continue
+        buy_date = pos.get("buy_date", "-")
+        lines.append(
+            f"  ⚠️ {pos['name']}: 보유중 (시초가 매도 미완료, 매수일 {buy_date})"
+        )
+
+    return lines
+
+
 def run_status_report() -> None:
     """11:00 - 상태 보고"""
     if not is_trading_day():
@@ -548,30 +651,23 @@ def run_status_report() -> None:
 
     print(f"\n[{datetime.now(KST).strftime('%H:%M:%S')} KST] 상태 보고")
     try:
-        pos_lines = []
-        for code, pos in _positions.items():
-            try:
-                info = kis_api.get_stock_info(code)
-                current = float(info.get("stck_prpr", pos["buy_price"]))
-                profit_pct = (current - pos["buy_price"]) / pos["buy_price"] * 100
-                pos_lines.append(f"  {pos['name']}: {profit_pct:+.1f}% ({pos['strategy']})")
-                time.sleep(0.3)
-            except Exception:
-                pos_lines.append(f"  {pos['name']}: 조회 실패")
+        price_map = kis_api.get_holdings_price_map()
 
-        # 종가베팅 포지션 현황
-        closing_lines = []
-        for code, pos in _closing_positions.items():
-            try:
-                info = kis_api.get_stock_info(code)
-                current = float(info.get("stck_prpr", pos["buy_price"]))
-                profit_pct = (current - pos["buy_price"]) / pos["buy_price"] * 100
-                closing_lines.append(
-                    f"  🌙{pos['name']}: {profit_pct:+.1f}% (매수일:{pos.get('buy_date','-')})"
-                )
-                time.sleep(0.3)
-            except Exception:
-                closing_lines.append(f"  🌙{pos['name']}: 조회 실패")
+        pos_lines = [
+            _format_position_report_line(code, pos, price_map)
+            for code, pos in _positions.items()
+        ]
+
+        closing_lines = [
+            _format_position_report_line(
+                code, pos, price_map,
+                prefix="🌙",
+                extra=f"(매수일:{pos.get('buy_date', '-')})",
+            )
+            for code, pos in _closing_positions.items()
+        ]
+
+        overnight_lines = _format_overnight_closing_lines()
 
         # 워치리스트 종목 중 진입 미충족 종목 정리
         waiting_lines = []
@@ -598,6 +694,8 @@ def run_status_report() -> None:
         if pos_lines:
             lines.append("📌 장중 보유 종목:")
             lines.extend(pos_lines)
+        if overnight_lines:
+            lines.extend(overnight_lines)
         if closing_lines:
             lines.append("🌙 종가베팅 보유 종목:")
             lines.extend(closing_lines)
@@ -846,14 +944,20 @@ def _check_closing_bet_entry() -> None:
             notifier.notify_error(f"{name} 종가베팅 진입 오류: {e}")
 
 
-def _execute_closing_sell(code: str, pos: dict, reason: str) -> None:
-    """종가베팅 포지션 매도 및 손익 기록"""
+def _execute_closing_sell(code: str, pos: dict, reason: str) -> dict:
+    """종가베팅 포지션 매도 및 손익 기록. 처리 결과 dict 반환."""
     name = pos["name"]
     quantity = pos["quantity"]
+    base = {
+        "code": code,
+        "name": name,
+        "quantity": quantity,
+        "buy_date": pos.get("buy_date", ""),
+        "buy_price": pos.get("buy_price", 0),
+    }
 
     try:
-        info = kis_api.get_stock_info(code)
-        current = float(info.get("stck_prpr", pos["buy_price"]))
+        current = kis_api.get_current_price(code, fallback=pos.get("buy_price"))
         profit_pct = (current - pos["buy_price"]) / pos["buy_price"] * 100
 
         result = kis_api.sell_stock(code, quantity)
@@ -874,12 +978,15 @@ def _execute_closing_sell(code: str, pos: dict, reason: str) -> None:
             del _closing_positions[code]
             _save_state()
             notifier.notify_sell(name, code, quantity, profit_pct, reason)
-        else:
-            msg = result.get("msg1", "알 수 없는 오류")
-            notifier.notify_error(f"{name} 종가베팅 매도 실패: {msg}")
+            return {**base, "status": "sold", "profit_pct": round(profit_pct, 2), "profit_won": profit_won}
+
+        msg = result.get("msg1", "알 수 없는 오류")
+        notifier.notify_error(f"{name} 종가베팅 매도 실패: {msg}")
+        return {**base, "status": "failed", "error": msg}
 
     except Exception as e:
         notifier.notify_error(f"{name} 종가베팅 매도 오류: {e}")
+        return {**base, "status": "failed", "error": str(e)}
 
 
 # ── 낙폭반등 진입 로직 ─────────────────────────────────────────────────────────
@@ -1290,12 +1397,13 @@ _last_ran: dict[str, str] = {}
 
 def _reset_daily_state() -> None:
     """자정이 지나 날짜가 바뀌면 일별 데이터 초기화 (종가베팅 오버나이트 포지션은 유지)"""
-    global _watchlist, _closing_watchlist, _trades_today
+    global _watchlist, _closing_watchlist, _trades_today, _morning_closing_log
     global _total_invested_today, _closing_invested_today, _crash_bounce_invested_today
     global _v_reversal_invested_today
     _watchlist = []
     _closing_watchlist = []
     _trades_today = []
+    _morning_closing_log = []
     _total_invested_today = 0
     _closing_invested_today = 0
     _crash_bounce_invested_today = 0

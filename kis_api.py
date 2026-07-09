@@ -702,11 +702,30 @@ def sell_stock(stock_code: str, quantity: int) -> dict:
     return data
 
 
+def get_holdings_price_map() -> dict[str, float]:
+    """보유 종목 현재가 맵 (계좌 잔고 조회 — 시세 API 실패 시 대체)"""
+    prices: dict[str, float] = {}
+    try:
+        _trade_throttle()
+        for h in get_holdings():
+            code = (h.get("pdno") or "").strip()
+            try:
+                price = float(h.get("prpr", 0) or 0)
+            except (TypeError, ValueError):
+                price = 0.0
+            if code and price > 0:
+                prices[code] = price
+    except Exception as e:
+        print(f"[잔고 시세] 조회 실패: {e}")
+    return prices
+
+
 def get_holdings() -> list[dict]:
     """보유 종목 조회"""
     acc_no, acc_prod = get_account_parts()
     tr_id = "TTTC8434R" if MODE == "실전" else "VTTC8434R"
 
+    _trade_throttle()
     res = requests.get(
         f"{TRADE_URL}/uapi/domestic-stock/v1/trading/inquire-balance",
         headers=_trade_headers(tr_id),
