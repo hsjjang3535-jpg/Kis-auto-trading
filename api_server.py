@@ -22,6 +22,7 @@ def health():
     import crash_bounce
     import v_reversal
     import ul_rebound
+    import k1_closing
     warn = kis_api.validate_account_for_mode()
     try:
         acct = kis_api.get_account_info()
@@ -42,6 +43,7 @@ def health():
             "crash_bounce": crash_bounce.is_enabled(),
             "v_reversal": v_reversal.is_enabled(),
             "ul_rebound": ul_rebound.is_enabled(),
+            "k1_closing": k1_closing.is_enabled(),
         },
     })
 

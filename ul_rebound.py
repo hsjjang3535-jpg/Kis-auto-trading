@@ -61,8 +61,13 @@ def is_enabled() -> bool:
     return ENABLED
 
 
+def is_weekday_active() -> bool:
+    """월~목(0~3)만 활성 — 금·토·일 제외"""
+    return datetime.now(KST).weekday() in (0, 1, 2, 3)
+
+
 def is_monitor_window() -> bool:
-    if not ENABLED:
+    if not ENABLED or not is_weekday_active():
         return False
     t = datetime.now(KST).hour * 60 + datetime.now(KST).minute
     return MONITOR_START_MIN <= t <= MONITOR_END_MIN
@@ -449,8 +454,11 @@ def scan_new_candidates(api_budget: int | None = None) -> tuple[list[dict], int]
     거래대금 상위 + 당일 상한가 종목에서 신규 후보 탐색.
     Returns: (신규 등록 알림 리스트, API 사용 횟수)
     """
-    if not ENABLED:
+    if not ENABLED or not is_weekday_active():
         return [], 0
+
+    import k1_closing
+    k1_codes = k1_closing.get_priority_codes() if k1_closing.is_enabled() else set()
 
     budget = api_budget if api_budget is not None else MAX_API_CALLS
     used = 0
@@ -488,7 +496,7 @@ def scan_new_candidates(api_budget: int | None = None) -> tuple[list[dict], int]
 
         code = item["code"]
         name = item["name"]
-        if code in _watchlist:
+        if code in _watchlist or code in k1_codes:
             continue
 
         try:
@@ -582,8 +590,11 @@ def check_level_alerts(api_budget: int | None = None) -> tuple[list[dict], list[
     워치리스트 종목의 가격 vs R0~R3 비교 + 가상 매매 시뮬레이션.
     Returns: (알림 리스트, 제거된 종목코드, API 사용 횟수)
     """
-    if not ENABLED or not _watchlist:
+    if not ENABLED or not _watchlist or not is_weekday_active():
         return [], [], 0
+
+    import k1_closing
+    k1_codes = k1_closing.get_priority_codes() if k1_closing.is_enabled() else set()
 
     budget = api_budget if api_budget is not None else MAX_API_CALLS
     used = 0
@@ -595,6 +606,9 @@ def check_level_alerts(api_budget: int | None = None) -> tuple[list[dict], list[
             break
 
         entry = _watchlist[code]
+        if code in k1_codes:
+            continue
+
         ul_date = entry.get("ul_date", "")
         ul_days = _trading_days_since(ul_date)
 

@@ -128,6 +128,20 @@ def notify_ul_rebound_sim_sell(
     )
 
 
+def notify_k1_sim_buy(
+    name: str, code: str, quantity: int, price: int,
+    pattern: str, reason: str,
+) -> None:
+    send(
+        f"🔷🟢 <b>[K1 시뮬] 매수</b>\n"
+        f"종목: {name} ({code})\n"
+        f"패턴: {pattern}\n"
+        f"수량: {quantity}주 / 가격: {price:,}원\n"
+        f"사유: {reason}\n"
+        f"📋 실전 매수와 함께 기록 (4일차 청산)"
+    )
+
+
 def notify_screening_result(candidates: list) -> None:
     if not candidates:
         send("🔍 오늘 종가베팅 후보 없음")

@@ -30,6 +30,7 @@ import notifier
 import crash_bounce
 import v_reversal
 import ul_rebound
+import k1_closing
 
 load_dotenv()
 
@@ -240,6 +241,9 @@ _closing_watchlist: list[dict] = []
 # 종가베팅 오버나이트 포지션 { 종목코드: {name, quantity, buy_price, buy_date} }
 _closing_positions: dict[str, dict] = {}
 
+# K1 종가베팅 포지션 (4일 보유, 금·월 매수)
+_k1_closing_positions: dict[str, dict] = {}
+
 # 오늘 종가베팅 투자금
 _closing_invested_today: int = 0
 _closing_low_cash_notified: set[str] = set()   # 금액 부족 알림 (종목당 1회)
@@ -275,6 +279,9 @@ def _save_state() -> None:
         "closing_invested_today": _closing_invested_today,
         "ul_rebound_watchlist": ul_rebound.dump_watchlist(),
         "ul_rebound_sim_trades_today": ul_rebound.dump_sim_trades_today(),
+        "k1_closing_watchlist": k1_closing.dump_watchlist(),
+        "k1_closing_positions": _k1_closing_positions,
+        "k1_closing_sim_trades_today": k1_closing.dump_sim_trades_today(),
     }
     try:
         with open(_STATE_FILE, "w", encoding="utf-8") as f:
@@ -286,7 +293,7 @@ def _save_state() -> None:
 def _load_state() -> None:
     global _positions, _total_invested_today, _trades_today
     global _closing_positions, _closing_invested_today, _crash_bounce_invested_today
-    global _v_reversal_invested_today
+    global _v_reversal_invested_today, _k1_closing_positions
     if not os.path.exists(_STATE_FILE):
         return
     try:
@@ -314,6 +321,11 @@ def _load_state() -> None:
                 f"{len(ul_rebound.get_watchlist())}개 불러옴"
             )
 
+        k1_closing.load_watchlist(state.get("k1_closing_watchlist", {}))
+        _k1_closing_positions = state.get("k1_closing_positions", {})
+        if _k1_closing_positions:
+            print(f"[상태 복원] K1 종가 포지션 {len(_k1_closing_positions)}개 불러옴")
+
         if state.get("date") == _today_kst():
             ul_rebound.load_sim_trades_today(state.get("ul_rebound_sim_trades_today", []))
             if ul_rebound.get_sim_trades_today():
@@ -321,6 +333,7 @@ def _load_state() -> None:
                     f"[상태 복원] 상한가 리바운드 시뮬 체결 "
                     f"{len(ul_rebound.get_sim_trades_today())}건 불러옴"
                 )
+            k1_closing.load_sim_trades_today(state.get("k1_closing_sim_trades_today", []))
 
         # 장중 포지션은 오늘 날짜인 경우만
         if state.get("date") == _today_kst():
@@ -442,9 +455,16 @@ def _update_capital() -> None:
 
 
 def run_morning_sell_closing_bet() -> None:
-    """09:00 - 종가베팅 포지션 시초가 매도 (전일 매수분)"""
+    """09:00 - 종가베팅 포지션 시초가 매도 (K1 종가 제외)"""
     if not is_trading_day():
         return
+
+    if _k1_closing_positions:
+        notifier.send(
+            f"🔷 K1 종가 {len(_k1_closing_positions)}개 보유 — "
+            f"익일 매도 없음 ({k1_closing.FORCE_SELL_DAY}일차 청산)"
+        )
+
     if not _closing_positions:
         return
 
@@ -458,8 +478,12 @@ def run_morning_sell_closing_bet() -> None:
 
 
 def run_closing_bet_screening() -> None:
-    """14:00 - 종가베팅 워치리스트 구성"""
+    """14:00 - 종가베팅 워치리스트 구성 (금·월=K1 / 화~목=기존 AI)"""
     if not is_trading_day():
+        return
+
+    if k1_closing.is_enabled() and k1_closing.is_k1_closing_day():
+        run_k1_closing_screening()
         return
 
     global _closing_watchlist, _last_closing_summary
@@ -694,6 +718,8 @@ def run_market_check() -> None:
     if ul_rebound.is_monitor_window():
         _check_ul_rebound_alerts()
 
+    _check_k1_closing_exit()
+
     if is_entry_time():
         _check_entry()
 
@@ -758,9 +784,16 @@ def run_status_report() -> None:
                 if e.get("sim", {}).get("status") == "open"
             )
             sim_trades = len(ul_rebound.get_sim_trades_today())
+            wd = datetime.now(KST).weekday()
+            ul_days = "월~목" if wd <= 3 else "비활성"
             lines.append(
-                f"상한가 리바운드 [시뮬]: 추적 {len(ul_rebound.get_watchlist())}개 / "
-                f"보유 {open_sim}개 / 오늘 체결 {sim_trades}건"
+                f"상한가 리바운드 [시뮬] ({ul_days}): 추적 {len(ul_rebound.get_watchlist())}개 / "
+                f"보유 {open_sim}개 / 오늘 {sim_trades}건"
+            )
+        if k1_closing.is_enabled():
+            lines.append(
+                f"K1 종가 (금·월): 보유 {len(_k1_closing_positions)}개 / "
+                f"시뮬 {len(k1_closing.get_sim_trades_today())}건"
             )
         if pos_lines:
             lines.append("📌 장중 보유 종목:")
@@ -808,6 +841,10 @@ def run_closing_report() -> None:
         ul_lines = ul_rebound.format_watchlist_summary()
         if ul_lines:
             lines.extend(ul_lines)
+            lines.append("")
+        k1_lines = k1_closing.format_summary()
+        if k1_lines:
+            lines.extend(k1_lines)
             lines.append("")
         if not _watchlist:
             summary = _last_morning_summary
@@ -902,6 +939,11 @@ def run_closing_report() -> None:
         lines.append("")
         lines.extend(ul_lines)
 
+    k1_lines = k1_closing.format_summary()
+    if k1_lines:
+        lines.append("")
+        lines.extend(k1_lines)
+
     notifier.send("\n".join(lines))
 
 
@@ -931,7 +973,10 @@ def run_force_close() -> None:
 # ── 종가베팅 진입/청산 로직 ────────────────────────────────────────────────────
 
 def _check_closing_bet_entry() -> None:
-    """종가베팅 매수 체크 (14:20~14:50, 5분마다)"""
+    """종가베팅 매수 체크 (14:20~14:50, 5분마다) — 화~목"""
+    if k1_closing.is_enabled() and k1_closing.is_k1_closing_day():
+        return
+
     if not _closing_watchlist:
         return
 
@@ -1310,8 +1355,8 @@ def _send_ul_rebound_alerts(alerts: list[dict]) -> None:
 
 
 def run_ul_rebound_morning_scan() -> None:
-    """09:05 — 상한가 후보 스캔 (알림만)"""
-    if not ul_rebound.is_enabled() or not is_trading_day():
+    """09:05 — 상한가 후보 스캔 (월~목 알림·시뮬)"""
+    if not ul_rebound.is_enabled() or not ul_rebound.is_weekday_active() or not is_trading_day():
         return
 
     try:
@@ -1326,8 +1371,8 @@ def run_ul_rebound_morning_scan() -> None:
 
 
 def _check_ul_rebound_alerts() -> None:
-    """5분마다 — R0~R3 구간 알림 체크"""
-    if not ul_rebound.is_enabled():
+    """5분마다 — R0~R3 구간 알림 체크 (월~목)"""
+    if not ul_rebound.is_enabled() or not ul_rebound.is_weekday_active():
         return
 
     try:
@@ -1341,6 +1386,165 @@ def _check_ul_rebound_alerts() -> None:
             )
     except Exception as e:
         print(f"[상한가리바운드] 구간 체크 오류: {e}")
+
+
+# ── K1 종가베팅 (금·월 실전 + 시뮬) ───────────────────────────────────────────
+
+def run_k1_closing_screening() -> None:
+    """14:00 — K1 종가 후보 스크리닝 (금·월)"""
+    if not is_trading_day():
+        return
+
+    wd = datetime.now(KST).weekday()
+    day_label = "금요일" if wd == 4 else "월요일"
+    print(f"\n[{datetime.now(KST).strftime('%H:%M:%S')} KST] K1 종가 스크리닝 ({day_label})")
+    notifier.send(
+        f"⏰ 오후 2시 - <b>K1 종가 스크리닝</b> ({day_label})\n"
+        f"피보 K1(0.236) 이탈 · 상한가 후 2일 이내"
+    )
+
+    global _closing_watchlist
+    try:
+        candidates, api_used = k1_closing.scan_closing_candidates()
+        print(f"[K1종가] 스크리닝 {len(candidates)}개 (API {api_used}회)")
+        _closing_watchlist = candidates  # 진입 체크용 임시 워치리스트
+
+        if candidates:
+            lines = [f"🔷 <b>K1 종가 후보 {len(candidates)}개</b> ({day_label})\n"]
+            for i, c in enumerate(candidates, 1):
+                lines.append(
+                    f"{i}. {c['name']}({c['code']}) [{c['pattern']}]\n"
+                    f"   K1 {c['k1']:,} / K2 {c['k2']:,} / 현재 {c['current']:,}\n"
+                    f"   {c['reason']}"
+                )
+            notifier.send("\n".join(lines))
+        else:
+            notifier.send(f"🔷 K1 종가 후보 없음 ({day_label})")
+        _save_state()
+    except Exception as e:
+        notifier.notify_error(f"K1 종가 스크리닝 오류: {e}")
+
+
+def _check_k1_closing_entry() -> None:
+    """14:20~14:50 — K1 종가 실전 매수 + 시뮬 기록"""
+    if not k1_closing.is_closing_entry_window():
+        return
+
+    global _closing_invested_today, _k1_closing_positions
+    global _closing_depleted_notified, _closing_balance_fail_notified
+
+    watchlist = list(k1_closing.get_watchlist().values())
+    if not watchlist:
+        return
+
+    if len(_k1_closing_positions) >= CLOSING_BET_MAX_POSITIONS:
+        return
+
+    budget_remaining = MAX_CLOSING_AMOUNT - _closing_invested_today
+    if budget_remaining <= 0:
+        return
+
+    cash: int | None = None
+    try:
+        cash = kis_api.get_orderable_cash()
+    except Exception as e:
+        print(f"[K1종가] 예수금 조회 실패: {e}")
+        remaining = budget_remaining
+    else:
+        remaining = min(budget_remaining, cash)
+        if remaining <= 0:
+            return
+
+    pending = sorted(watchlist, key=lambda x: x.get("priority_score", 0), reverse=True)
+    for stock in pending:
+        code = stock["code"]
+        name = stock["name"]
+        if code in _k1_closing_positions:
+            continue
+
+        try:
+            current = int(kis_api.get_current_price(code, fallback=stock.get("current")))
+            if current <= 0:
+                continue
+
+            k1_level = stock.get("k1", 0)
+            if k1_level <= 0 or current > k1_level * (1 + k1_closing.LEVEL_TOLERANCE_PCT / 100):
+                continue
+
+            sim_evt = k1_closing.record_sim_buy(stock, current)
+            if sim_evt:
+                notifier.notify_k1_sim_buy(
+                    sim_evt["name"], sim_evt["code"], sim_evt["quantity"],
+                    sim_evt["price"], sim_evt["pattern"], sim_evt["reason"],
+                )
+
+            buy_amount = min(MAX_CLOSING_BUY, remaining)
+            quantity = buy_amount // current
+            if quantity < 1:
+                continue
+
+            result = kis_api.buy_stock(code, quantity)
+            if result.get("rt_cd") == "0":
+                invested = quantity * current
+                _closing_invested_today += invested
+                _k1_closing_positions[code] = {
+                    "name": name,
+                    "quantity": quantity,
+                    "buy_price": current,
+                    "strategy": k1_closing.STRATEGY,
+                    "buy_reason": stock.get("reason", ""),
+                    "buy_date": _today_kst(),
+                    "pattern": stock.get("pattern", ""),
+                    "k1": stock.get("k1", 0),
+                }
+                _save_state()
+                remaining -= invested
+                notifier.notify_buy(
+                    name, code, quantity, current,
+                    f"[K1종가] {stock.get('pattern', '')} · {stock.get('reason', '')}",
+                )
+                print(f"[K1종가] 매수 {name}({code}) {quantity}주 @ {current:,}")
+                break
+            else:
+                notifier.notify_error(f"{name} K1 종가 매수 실패: {result.get('msg1', '')}")
+
+            time.sleep(kis_api.trade_interval())
+        except Exception as e:
+            notifier.notify_error(f"{name} K1 종가 진입 오류: {e}")
+
+
+def _check_k1_closing_exit() -> None:
+    """K1 포지션 4일차 강제 청산"""
+    if not _k1_closing_positions:
+        return
+
+    for code, pos in list(_k1_closing_positions.items()):
+        should, reason = k1_closing.evaluate_force_sell_day(pos)
+        if not should:
+            continue
+        try:
+            current, profit_pct, _ = _sell_reference_price(code, pos["buy_price"])
+            quantity = pos["quantity"]
+            name = pos["name"]
+            result = kis_api.sell_stock(code, quantity)
+            if result.get("rt_cd") == "0":
+                profit_won = int((current - pos["buy_price"]) * quantity)
+                _trades_today.append({
+                    "name": name, "code": code, "quantity": quantity,
+                    "buy_price": pos["buy_price"], "sell_price": int(current),
+                    "profit_pct": round(profit_pct, 2), "profit_won": profit_won,
+                    "buy_reason": pos.get("buy_reason", ""),
+                    "sell_reason": reason, "strategy": k1_closing.STRATEGY,
+                })
+                del _k1_closing_positions[code]
+                _save_state()
+                notifier.notify_sell(name, code, quantity, profit_pct, reason)
+                print(f"[K1종가] 매도 {name}({code}) {reason}")
+            else:
+                notifier.notify_error(f"{name} K1 청산 실패: {result.get('msg1', '')}")
+        except Exception as e:
+            notifier.notify_error(f"{name} K1 청산 오류: {e}")
+        time.sleep(0.5)
 
 
 # ── 장중매매 진입 로직 ─────────────────────────────────────────────────────────
@@ -1621,6 +1825,7 @@ def _reset_daily_state() -> None:
     _closing_balance_fail_notified = False
     # _closing_positions는 초기화 안 함 - 오버나이트 포지션 유지
     ul_rebound.reset_daily_sim_trades()
+    k1_closing.reset_daily_sim_trades()
     _save_state()
     print(f"[일별 초기화] {_today_kst()} 새 거래일 시작")
 
@@ -1660,10 +1865,17 @@ def main():
     ul_note = ""
     if ul_rebound.is_enabled():
         ul_note = (
-            f"\n🟣 상한가 리바운드: [시뮬] / 추적 {len(ul_rebound.get_watchlist())}개 / "
-            f"1회 {ul_rebound.SIM_AMOUNT:,}원 / 거래대금 "
-            f"{ul_rebound.MIN_TRADING_VALUE // 100_000_000:,}억+"
+            f"\n🟣 상한가 리바운드: [시뮬] 월~목 / 추적 {len(ul_rebound.get_watchlist())}개"
         )
+    k1_note = ""
+    if k1_closing.is_enabled():
+        k1_note = (
+            f"\n🔷 K1 종가: 금·월 실전 / 보유 {len(_k1_closing_positions)}개 / "
+            f"4일차 청산"
+        )
+    k1_pos_note = ""
+    if _k1_closing_positions:
+        k1_pos_note = f"\n🔷 K1 종가 보유 {len(_k1_closing_positions)}개 (4일 보유)"
     cash_line = (
         f"💰 주문가능금액: {orderable_cash:,}원\n"
         if orderable_cash is not None
@@ -1676,12 +1888,14 @@ def main():
         f"{cash_line}"
         "📌 장중매매: 09:05 스크리닝 → 09:10~14:30 진입 → 14:50 강제청산\n"
         f"   장중 AI: {'ON (Groq)' if ENABLE_INTRADAY_AI else 'OFF (기술조건만)'}\n"
-        "🌙 종가베팅: 14:00 스크리닝 → 14:20~14:50 매수 → 익일 09:00 시초가 매도\n"
+        "🌙 종가: 화~목 AI종가(익일매도) / 금·월 K1종가(4일보유)\n"
         f"✅ 익절 트레일링 +{TAKE_PROFIT_PCT}% / 손절 -{STOP_LOSS_PCT}% / 15:10 손익보고"
         f"{crash_note}"
         f"{v_note}"
         f"{ul_note}"
+        f"{k1_note}"
         f"{closing_pos_note}"
+        f"{k1_pos_note}"
     )
 
     print("KST 직접 체크 루프 시작 (schedule 라이브러리 미사용)")
@@ -1765,7 +1979,10 @@ def main():
             slot = t // 5
             if slot != last_closing_slot:
                 last_closing_slot = slot
-                _check_closing_bet_entry()
+                if k1_closing.is_closing_entry_window():
+                    _check_k1_closing_entry()
+                else:
+                    _check_closing_bet_entry()
 
         # ── 14:50~15:00 KST - 장중매매 강제 청산 (종가베팅 제외) ────────────
         if 14 * 60 + 50 <= t <= 15 * 60 and _last_ran.get("force_close") != today:
