@@ -7,7 +7,7 @@
   09:10 ~ 14:45 - 5분마다 장중매매 진입/청산 체크
   09:10 ~ 10:30 - 5분마다 낙폭반등 체크 (ENABLE_CRASH_BOUNCE=true 시)
   09:15 ~ 10:30 - 5분마다 V자반등 체크 (ENABLE_V_REVERSAL=true 시)
-  11:00 - 상태 보고
+  11:00 - 상태 보고 / 오전 워치리스트 0개 시 보충 스크리닝
   14:00 - 종가베팅 스크리닝
   14:20 ~ 14:50 - 5분마다 종가베팅 매수 체크
   14:50 - 장중매매 잔여 포지션 강제 청산 (종가베팅 제외)
@@ -531,15 +531,25 @@ def run_closing_bet_screening() -> None:
         notifier.notify_error(msg)
 
 
-def run_morning_screening() -> bool:
-    """09:05 - 워치리스트 구성. 성공 True / 실패 False"""
+def run_morning_screening(supplementary: bool = False) -> bool:
+    """장중 워치리스트 구성. 성공 True / 실패 False
+
+    supplementary=True: 11:00 보충 스크리닝 (오전 워치리스트 0개일 때만 호출)
+    """
     if not is_trading_day():
         return False
 
     global _watchlist, _last_morning_summary
-    print(f"\n[{datetime.now(KST).strftime('%H:%M:%S')} KST] 오전 스크리닝 시작")
-    _update_capital()  # 실제 예수금으로 투자 한도 자동 조절
-    notifier.send("⏰ 오전 9시 05분 - 장 시작 후 워치리스트 구성 시작")
+    label = "보충" if supplementary else "오전"
+    print(f"\n[{datetime.now(KST).strftime('%H:%M:%S')} KST] {label} 스크리닝 시작")
+    if not supplementary:
+        _update_capital()  # 실제 예수금으로 투자 한도 자동 조절
+        notifier.send("⏰ 오전 9시 05분 - 장 시작 후 워치리스트 구성 시작")
+    else:
+        notifier.send(
+            "🔄 오전 11시 - <b>보충 스크리닝</b> 시작\n"
+            "(09:05 워치리스트 0개 → 장중 후보 재탐색)"
+        )
 
     try:
         candidates = screener.screen_candidates(top_n=30)
@@ -603,6 +613,7 @@ def run_morning_screening() -> bool:
             "approved": len(approved),
             "ai_rejected": ai_rejected,
             "ai_skipped": ai_skipped,
+            "supplementary": supplementary,
         }
         _watchlist = approved
 
@@ -613,7 +624,10 @@ def run_morning_screening() -> bool:
                 ai_note = " (AI 미적용)"
             else:
                 ai_note = ""
-            lines = [f"🔍 <b>장중매매 워치리스트 {len(approved)}개{ai_note}</b> (우선순위순)\n"]
+            prefix = "🔄 보충" if supplementary else "🔍"
+            lines = [
+                f"{prefix} <b>장중매매 워치리스트 {len(approved)}개{ai_note}</b> (우선순위순)\n"
+            ]
             strategy_map = {"상단매매": "🔴", "돌파매매": "🟡", "하단매매": "🔵", "낙폭반등": "🔶", "V자반등": "🟢"}
             for i, c in enumerate(approved, 1):
                 emoji = strategy_map.get(c.get("strategy", ""), "⚪")
@@ -624,13 +638,22 @@ def run_morning_screening() -> bool:
                 )
             notifier.send("\n".join(lines))
         else:
-            notifier.send(_format_empty_watchlist_msg("장중"))
+            if supplementary:
+                notifier.send(
+                    "🔄 <b>보충 스크리닝 결과</b>\n"
+                    + _format_empty_watchlist_msg("장중").replace(
+                        "오늘 장중 워치리스트 없음",
+                        "보충 스크리닝 후에도 워치리스트 없음",
+                    )
+                )
+            else:
+                notifier.send(_format_empty_watchlist_msg("장중"))
 
-        print(f"[스크리닝 완료] 워치리스트 {len(approved)}개")
+        print(f"[{label} 스크리닝 완료] 워치리스트 {len(approved)}개")
         return True
 
     except Exception as e:
-        msg = f"오전 스크리닝 오류: {e}"
+        msg = f"{label} 스크리닝 오류: {e}"
         print(msg)
         notifier.notify_error(msg)
         return False
@@ -1577,6 +1600,12 @@ def main():
             if slot != last_5min_slot:
                 last_5min_slot = slot
                 run_market_check()
+
+        # ── 11:00~11:10 KST - 보충 스크리닝 (오전 워치리스트 0개) ─────────────
+        if 11 * 60 <= t <= 11 * 60 + 10 and _last_ran.get("supplementary_screening") != today:
+            _last_ran["supplementary_screening"] = today
+            if not _watchlist:
+                run_morning_screening(supplementary=True)
 
         # ── 11:00~11:10 KST - 상태 보고 ─────────────────────────────────────
         if 11 * 60 <= t <= 11 * 60 + 10 and _last_ran.get("status") != today:
