@@ -756,7 +756,24 @@ def run_closing_report() -> None:
     today = datetime.now(KST).strftime("%Y-%m-%d")
 
     if not _trades_today:
-        lines = [f"📋 <b>오늘 장마감 보고 ({today})</b>", "매매 없음 (체결 종목 없음)\n"]
+        lines = [f"📋 <b>오늘 장마감 보고 ({today})</b>\n"]
+        if _closing_positions:
+            lines.append("당일 청산 완료 매매 없음 (종가베팅 오버나이트 보유)\n")
+            lines.append(
+                f"🌙 종가베팅 오버나이트 {len(_closing_positions)}개 보유 "
+                f"(익일 09:00 시초가 매도)"
+            )
+            for code, pos in _closing_positions.items():
+                invested = pos["buy_price"] * pos["quantity"]
+                lines.append(
+                    f"   {pos['name']}({code}) {pos['buy_price']:,}원 × "
+                    f"{pos['quantity']}주 = {invested:,}원"
+                )
+                if pos.get("buy_reason"):
+                    lines.append(f"   매수사유: {pos['buy_reason']}")
+            lines.append("")
+        else:
+            lines.append("매매 없음 (체결 종목 없음)\n")
         if not _watchlist:
             summary = _last_morning_summary
             stats = summary.get("stats") or screener.get_last_screen_stats()
