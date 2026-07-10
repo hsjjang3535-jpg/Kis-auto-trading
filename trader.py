@@ -29,6 +29,7 @@ import ai_analyzer
 import notifier
 import crash_bounce
 import v_reversal
+import ul_rebound
 
 load_dotenv()
 
@@ -272,6 +273,8 @@ def _save_state() -> None:
         "trades_today": _trades_today,
         "closing_positions": _closing_positions,       # 오버나이트 유지
         "closing_invested_today": _closing_invested_today,
+        "ul_rebound_watchlist": ul_rebound.dump_watchlist(),
+        "ul_rebound_sim_trades_today": ul_rebound.dump_sim_trades_today(),
     }
     try:
         with open(_STATE_FILE, "w", encoding="utf-8") as f:
@@ -303,6 +306,21 @@ def _load_state() -> None:
         _closing_positions = state.get("closing_positions", {})
         if _closing_positions:
             print(f"[상태 복원] 종가베팅 포지션 {len(_closing_positions)}개 불러옴 (오버나이트)")
+
+        ul_rebound.load_watchlist(state.get("ul_rebound_watchlist", {}))
+        if ul_rebound.get_watchlist():
+            print(
+                f"[상태 복원] 상한가 리바운드 추적 "
+                f"{len(ul_rebound.get_watchlist())}개 불러옴"
+            )
+
+        if state.get("date") == _today_kst():
+            ul_rebound.load_sim_trades_today(state.get("ul_rebound_sim_trades_today", []))
+            if ul_rebound.get_sim_trades_today():
+                print(
+                    f"[상태 복원] 상한가 리바운드 시뮬 체결 "
+                    f"{len(ul_rebound.get_sim_trades_today())}건 불러옴"
+                )
 
         # 장중 포지션은 오늘 날짜인 경우만
         if state.get("date") == _today_kst():
@@ -673,6 +691,9 @@ def run_market_check() -> None:
     if v_reversal.is_entry_window():
         _check_v_reversal_entry()
 
+    if ul_rebound.is_monitor_window():
+        _check_ul_rebound_alerts()
+
     if is_entry_time():
         _check_entry()
 
@@ -731,6 +752,16 @@ def run_status_report() -> None:
             f"종가베팅 - 워치리스트: {len(_closing_watchlist)}개 / 보유: {len(_closing_positions)}개",
             f"종가베팅 투자금: {_closing_invested_today:,}원 / {MAX_CLOSING_AMOUNT:,}원",
         ]
+        if ul_rebound.is_enabled():
+            open_sim = sum(
+                1 for e in ul_rebound.get_watchlist().values()
+                if e.get("sim", {}).get("status") == "open"
+            )
+            sim_trades = len(ul_rebound.get_sim_trades_today())
+            lines.append(
+                f"상한가 리바운드 [시뮬]: 추적 {len(ul_rebound.get_watchlist())}개 / "
+                f"보유 {open_sim}개 / 오늘 체결 {sim_trades}건"
+            )
         if pos_lines:
             lines.append("📌 장중 보유 종목:")
             lines.extend(pos_lines)
@@ -774,6 +805,10 @@ def run_closing_report() -> None:
             lines.append("")
         else:
             lines.append("매매 없음 (체결 종목 없음)\n")
+        ul_lines = ul_rebound.format_watchlist_summary()
+        if ul_lines:
+            lines.extend(ul_lines)
+            lines.append("")
         if not _watchlist:
             summary = _last_morning_summary
             stats = summary.get("stats") or screener.get_last_screen_stats()
@@ -861,6 +896,11 @@ def run_closing_report() -> None:
     lines.append(f"  손절 {len(lose_trades)}건: {total_loss:,}원")
     net_sign = "+" if net >= 0 else ""
     lines.append(f"\n🏁 오늘 순손익: <b>{net_sign}{net:,}원</b>")
+
+    ul_lines = ul_rebound.format_watchlist_summary()
+    if ul_lines:
+        lines.append("")
+        lines.extend(ul_lines)
 
     notifier.send("\n".join(lines))
 
@@ -1228,6 +1268,81 @@ def _check_v_reversal_entry() -> None:
             notifier.notify_error(f"{name} V자반등 진입 오류: {e}")
 
 
+# ── 상한가 리바운드 알림 (자동 매매 없음) ─────────────────────────────────────
+
+def _send_ul_rebound_alerts(alerts: list[dict]) -> None:
+    for alert in alerts:
+        entry = alert["entry"]
+        sim = alert.get("sim")
+
+        notifier.notify_ul_rebound(
+            alert["type"],
+            entry["name"],
+            entry["code"],
+            alert.get("current", 0),
+            entry,
+            alert.get("message", ""),
+            sim=sim,
+        )
+
+        if not sim:
+            continue
+
+        action = sim.get("action")
+        if action == "buy":
+            notifier.notify_ul_rebound_sim_buy(
+                sim["name"], sim["code"], sim["quantity"],
+                sim["price"], sim["reason"],
+            )
+        elif action == "add":
+            notifier.notify_ul_rebound_sim_add(
+                sim["name"], sim["code"], sim["quantity"],
+                sim["price"], sim["total_quantity"],
+                sim["avg_price"], sim["reason"],
+            )
+        elif action == "sell":
+            notifier.notify_ul_rebound_sim_sell(
+                sim["name"], sim["code"], sim["quantity"],
+                sim["buy_price"], sim["sell_price"],
+                sim["profit_pct"], sim["profit_won"],
+                sim["sell_reason"],
+            )
+
+
+def run_ul_rebound_morning_scan() -> None:
+    """09:05 — 상한가 후보 스캔 (알림만)"""
+    if not ul_rebound.is_enabled() or not is_trading_day():
+        return
+
+    try:
+        new_alerts, api_used = ul_rebound.scan_new_candidates()
+        print(f"[상한가리바운드] 오전 스캔 신규 {len(new_alerts)}개 (API {api_used}회)")
+        if new_alerts:
+            _send_ul_rebound_alerts(new_alerts)
+            _save_state()
+    except Exception as e:
+        print(f"[상한가리바운드] 오전 스캔 오류: {e}")
+        notifier.notify_error(f"상한가 리바운드 스캔 오류: {e}")
+
+
+def _check_ul_rebound_alerts() -> None:
+    """5분마다 — R0~R3 구간 알림 체크"""
+    if not ul_rebound.is_enabled():
+        return
+
+    try:
+        level_alerts, removed, api_used = ul_rebound.check_level_alerts()
+        if level_alerts:
+            _send_ul_rebound_alerts(level_alerts)
+            _save_state()
+            print(
+                f"[상한가리바운드] 구간 알림 {len(level_alerts)}건 "
+                f"(제거 {len(removed)}개, API {api_used}회)"
+            )
+    except Exception as e:
+        print(f"[상한가리바운드] 구간 체크 오류: {e}")
+
+
 # ── 장중매매 진입 로직 ─────────────────────────────────────────────────────────
 
 def _check_entry() -> None:
@@ -1505,6 +1620,7 @@ def _reset_daily_state() -> None:
     _closing_depleted_notified = False
     _closing_balance_fail_notified = False
     # _closing_positions는 초기화 안 함 - 오버나이트 포지션 유지
+    ul_rebound.reset_daily_sim_trades()
     _save_state()
     print(f"[일별 초기화] {_today_kst()} 새 거래일 시작")
 
@@ -1541,6 +1657,13 @@ def main():
             f"{os.getenv('V_REVERSAL_ENTRY_END', '10:30')} / "
             f"한도 {v_reversal.MAX_AMOUNT:,}원"
         )
+    ul_note = ""
+    if ul_rebound.is_enabled():
+        ul_note = (
+            f"\n🟣 상한가 리바운드: [시뮬] / 추적 {len(ul_rebound.get_watchlist())}개 / "
+            f"1회 {ul_rebound.SIM_AMOUNT:,}원 / 거래대금 "
+            f"{ul_rebound.MIN_TRADING_VALUE // 100_000_000:,}억+"
+        )
     cash_line = (
         f"💰 주문가능금액: {orderable_cash:,}원\n"
         if orderable_cash is not None
@@ -1557,6 +1680,7 @@ def main():
         f"✅ 익절 트레일링 +{TAKE_PROFIT_PCT}% / 손절 -{STOP_LOSS_PCT}% / 15:10 손익보고"
         f"{crash_note}"
         f"{v_note}"
+        f"{ul_note}"
         f"{closing_pos_note}"
     )
 
@@ -1580,6 +1704,7 @@ def main():
             notifier.send("▶️ 봇 재시작 감지 (스크리닝 시간) - 즉시 스크리닝 실행")
             if run_morning_screening():
                 _last_ran["screening_ok"] = _init_today
+                run_ul_rebound_morning_scan()
 
     last_5min_slot = -1       # 장중매매 5분 슬롯
     last_closing_slot = -1    # 종가베팅 5분 슬롯
@@ -1610,6 +1735,7 @@ def main():
                 last_screening_slot = slot
                 if run_morning_screening():
                     _last_ran["screening_ok"] = today
+                    run_ul_rebound_morning_scan()
 
         # ── 09:10~14:45 KST - 5분마다 장중 진입/청산 체크 ───────────────────
         if 9 * 60 + 10 <= t <= 14 * 60 + 45:

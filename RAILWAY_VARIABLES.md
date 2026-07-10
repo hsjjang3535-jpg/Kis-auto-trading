@@ -100,6 +100,27 @@
 
 ---
 
+## 🟣 상한가 리바운드 — 1단계 알림만 (`ENABLE_UL_REBOUND=true`)
+
+자동 매매 없음. 텔레그램으로 R0~R3 구간·상한가 포착만 알림.
+
+| Variable | 기본값 | 설명 |
+|----------|--------|------|
+| `ENABLE_UL_REBOUND` | `false` | 알림 ON |
+| `UL_REBOUND_MONITOR_START` | `09:00` | 모니터링 시작 |
+| `UL_REBOUND_MONITOR_END` | `15:30` | 모니터링 종료 |
+| `UL_REBOUND_MIN_TRADING_VALUE` | `50000000000` | 거래대금 500억+ |
+| `UL_REBOUND_WINDOW_DAYS` | `7` | 상한가 후 추적 일수 |
+| `UL_REBOUND_FORCE_SELL_DAY` | `4` | 4거래일차 청산 알림 |
+| `UL_REBOUND_SCAN_TOP` | `30` | 거래대금 상위 N |
+| `UL_REBOUND_MAX_API_CALLS` | `25` | 스캔당 API 상한 |
+| `UL_REBOUND_SIM_ENABLED` | `true` | 가상매매 시뮬 ON |
+| `UL_REBOUND_SIM_AMOUNT` | `500000` | 시뮬 1회 매수금 (R2는 1:1 추가) |
+
+> 모의/실전 모두 동작 (실제 주문 없음). 시작 메시지에 `🟣 상한가 리바운드: [시뮬]` 표시.
+
+---
+
 ## 🔵 선택 (없어도 동작)
 
 | Variable | 설명 |
@@ -123,7 +144,7 @@
 ### 그대로 유지해도 되는 것 (예시)
 
 - `MAX_TOTAL_AMOUNT`, `MAX_BUY_AMOUNT`, `MAX_CLOSING_AMOUNT`, `MAX_CLOSING_BUY`
-- `ENABLE_INTRADAY_AI`, `ENABLE_CRASH_BOUNCE`, `ENABLE_V_REVERSAL`
+- `ENABLE_INTRADAY_AI`, `ENABLE_CRASH_BOUNCE`, `ENABLE_V_REVERSAL`, `ENABLE_UL_REBOUND`
 - `STOP_LOSS_PCT`, `TAKE_PROFIT_PCT`, `DYNAMIC_CAPITAL`, `BUY_RATIO`
 - `TELEGRAM_*`, `GROQ_API_KEY`, `API_SECRET`
 
