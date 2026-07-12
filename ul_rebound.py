@@ -459,9 +459,12 @@ def scan_new_candidates(api_budget: int | None = None) -> tuple[list[dict], int]
 
     import k1_closing
     import k2_intraday
+    import k1_plus
     priority_codes = set()
     if k1_closing.is_enabled():
         priority_codes |= k1_closing.get_priority_codes()
+    if k1_plus.is_enabled():
+        priority_codes |= k1_plus.get_priority_codes()
     if k2_intraday.is_enabled():
         priority_codes |= k2_intraday.get_priority_codes()
 
@@ -600,9 +603,12 @@ def check_level_alerts(api_budget: int | None = None) -> tuple[list[dict], list[
 
     import k1_closing
     import k2_intraday
+    import k1_plus
     priority_codes = set()
     if k1_closing.is_enabled():
         priority_codes |= k1_closing.get_priority_codes()
+    if k1_plus.is_enabled():
+        priority_codes |= k1_plus.get_priority_codes()
     if k2_intraday.is_enabled():
         priority_codes |= k2_intraday.get_priority_codes()
 

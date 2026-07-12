@@ -296,6 +296,12 @@ def scan_new_candidates(api_budget: int | None = None) -> tuple[list[dict], int]
     used = 0
     new_alerts: list[dict] = []
     k1_codes = k1_closing.get_priority_codes() if k1_closing.is_enabled() else set()
+    try:
+        import k1_plus
+        if k1_plus.is_enabled():
+            k1_codes |= k1_plus.get_priority_codes()
+    except Exception:
+        pass
 
     try:
         kospi = kis_api.get_top_trading_value(SCAN_TOP_N, market="0001")
@@ -391,6 +397,12 @@ def check_alerts(api_budget: int | None = None) -> tuple[list[dict], list[str], 
     alerts: list[dict] = []
     removed: list[str] = []
     k1_codes = k1_closing.get_priority_codes() if k1_closing.is_enabled() else set()
+    try:
+        import k1_plus
+        if k1_plus.is_enabled():
+            k1_codes |= k1_plus.get_priority_codes()
+    except Exception:
+        pass
 
     for code in list(_watchlist.keys()):
         if used >= budget:
@@ -398,7 +410,7 @@ def check_alerts(api_budget: int | None = None) -> tuple[list[dict], list[str], 
 
         entry = _watchlist[code]
         if code in k1_codes:
-            # K1 우선 — 추적만 유지하되 시뮬 매수는 하지 않음 (이미 open이면 청산만)
+            # K1/K1+ 우선 — 시뮬 매수는 하지 않음 (open이면 청산만)
             pass
 
         ul_date = entry.get("ul_date", "")
