@@ -142,6 +142,69 @@ def notify_k1_sim_buy(
     )
 
 
+_K2_LABELS = {
+    "NEW": "신규 추적",
+    "K2_BUY": "K2 매수구간",
+    "DAY4": "4일차 청산",
+    "TP_HIGH": "고점 익절",
+    "SL_LOW": "저점 손절",
+    "EXPIRED": "추적 종료",
+}
+
+
+def notify_k2_alert(
+    alert_type: str,
+    name: str,
+    code: str,
+    current: int,
+    entry: dict,
+    message: str,
+) -> None:
+    label = _K2_LABELS.get(alert_type, alert_type)
+    lines = [
+        f"🔶 <b>K2 [{label}]</b>",
+        f"종목: {name} ({code})",
+        f"현재가: {current:,}원" if current > 0 else "",
+        f"상한가일: {entry.get('ul_date', '-')} (D{entry.get('day_num', '?')})",
+        f"K1 {entry.get('k1', 0):,} | K2 {entry.get('k2', 0):,} | "
+        f"고점 {entry.get('fib_high', 0):,} | 저점 {entry.get('fib_low', 0):,}",
+        f"💡 {message}",
+        "⚠️ 시뮬만 — 실제 주문 없음",
+    ]
+    send("\n".join(line for line in lines if line))
+
+
+def notify_k2_sim_buy(
+    name: str, code: str, quantity: int, price: int, k2: int, reason: str,
+) -> None:
+    send(
+        f"🔶🟢 <b>[K2 시뮬] 매수</b>\n"
+        f"종목: {name} ({code})\n"
+        f"수량: {quantity}주 / 가격: {price:,}원\n"
+        f"K2선: {k2:,}원\n"
+        f"사유: {reason}\n"
+        f"⚠️ 시뮬만 — 실제 주문 없음 / 청산은 가정 규칙"
+    )
+
+
+def notify_k2_sim_sell(
+    name: str, code: str, quantity: int,
+    buy_price: int, sell_price: int,
+    profit_pct: float, profit_won: int, reason: str,
+) -> None:
+    emoji = "📈" if profit_won >= 0 else "📉"
+    sign = "+" if profit_won >= 0 else ""
+    send(
+        f"🔶{emoji} <b>[K2 시뮬] 매도</b>\n"
+        f"종목: {name} ({code})\n"
+        f"수량: {quantity}주\n"
+        f"매수가: {buy_price:,}원 → 매도가: {sell_price:,}원\n"
+        f"수익률: {sign}{profit_pct:.2f}% ({sign}{profit_won:,}원)\n"
+        f"사유: {reason}\n"
+        f"⚠️ 시뮬만 — 실제 주문 없음"
+    )
+
+
 def notify_screening_result(candidates: list) -> None:
     if not candidates:
         send("🔍 오늘 종가베팅 후보 없음")

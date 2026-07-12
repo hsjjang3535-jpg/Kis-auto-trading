@@ -23,6 +23,7 @@ def health():
     import v_reversal
     import ul_rebound
     import k1_closing
+    import k2_intraday
     warn = kis_api.validate_account_for_mode()
     try:
         acct = kis_api.get_account_info()
@@ -44,6 +45,7 @@ def health():
             "v_reversal": v_reversal.is_enabled(),
             "ul_rebound": ul_rebound.is_enabled(),
             "k1_closing": k1_closing.is_enabled(),
+            "k2_sim": k2_intraday.is_enabled(),
         },
     })
 

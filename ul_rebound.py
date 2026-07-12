@@ -458,7 +458,12 @@ def scan_new_candidates(api_budget: int | None = None) -> tuple[list[dict], int]
         return [], 0
 
     import k1_closing
-    k1_codes = k1_closing.get_priority_codes() if k1_closing.is_enabled() else set()
+    import k2_intraday
+    priority_codes = set()
+    if k1_closing.is_enabled():
+        priority_codes |= k1_closing.get_priority_codes()
+    if k2_intraday.is_enabled():
+        priority_codes |= k2_intraday.get_priority_codes()
 
     budget = api_budget if api_budget is not None else MAX_API_CALLS
     used = 0
@@ -496,7 +501,7 @@ def scan_new_candidates(api_budget: int | None = None) -> tuple[list[dict], int]
 
         code = item["code"]
         name = item["name"]
-        if code in _watchlist or code in k1_codes:
+        if code in _watchlist or code in priority_codes:
             continue
 
         try:
@@ -594,7 +599,12 @@ def check_level_alerts(api_budget: int | None = None) -> tuple[list[dict], list[
         return [], [], 0
 
     import k1_closing
-    k1_codes = k1_closing.get_priority_codes() if k1_closing.is_enabled() else set()
+    import k2_intraday
+    priority_codes = set()
+    if k1_closing.is_enabled():
+        priority_codes |= k1_closing.get_priority_codes()
+    if k2_intraday.is_enabled():
+        priority_codes |= k2_intraday.get_priority_codes()
 
     budget = api_budget if api_budget is not None else MAX_API_CALLS
     used = 0
@@ -606,7 +616,7 @@ def check_level_alerts(api_budget: int | None = None) -> tuple[list[dict], list[
             break
 
         entry = _watchlist[code]
-        if code in k1_codes:
+        if code in priority_codes:
             continue
 
         ul_date = entry.get("ul_date", "")
