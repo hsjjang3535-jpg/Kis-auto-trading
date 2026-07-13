@@ -159,7 +159,7 @@
 | `K2_MAX_API_CALLS` | `20` | 스캔당 API 상한 |
 | `K2_MAX_WATCH` | `5` | 최대 추적 종목 |
 
-우선순위: **K1 > K1플러스 > K2 > 상한가 리바운딩**. 장중은 현재가만 조회(분봉 반복 없음).
+우선순위: **K1 > K1플러스 > K2플러스 > K2 > 상한가 리바운딩**. 장중은 현재가만 조회(분봉 반복 없음).
 
 ---
 
@@ -177,7 +177,26 @@
 | `K1_PLUS_REQUIRE_NEW_HIGH` | `true` | 신고가 필터 |
 | `K1_PLUS_MAX_WATCH` | `5` | 최대 추적 종목 |
 
-우선순위: **K1 실전 > K1플러스 > K2 > 상한가 리바운딩**.
+우선순위: **K1 실전 > K1플러스 > K2플러스 > K2 > 상한가 리바운딩**.
+
+---
+
+## 🔷 K2플러스 — 시뮬만 (`ENABLE_K2_PLUS_SIM=true`)
+
+세력봉(거래대금 500억+, 상한가 제외) 기준 피보 K2(0.5) 훼손 시 장중 가상 매수. 세력봉일=D1 포함 4일까지. 실제 주문 없음.
+
+| Variable | 기본값 | 설명 |
+|----------|--------|------|
+| `ENABLE_K2_PLUS_SIM` | `false` | K2플러스 시뮬 ON |
+| `K2_PLUS_MIN_TRADING_VALUE` | `50000000000` | 세력봉 최소 거래대금 (500억) |
+| `K2_PLUS_MIN_DAY_RATE` | `5.0` | 당일 등락률 하한 (%) |
+| `K2_PLUS_MAX_DAYS_FROM_HIGH` | `4` | 세력봉일=D1 포함 4일까지 매수 |
+| `K2_PLUS_FORCE_SELL_DAY` | `4` | 매수 후 4일차 강제청산 (가정) |
+| `K2_PLUS_SIM_AMOUNT` | `500000` | 가상 1회 매수금 |
+| `K2_PLUS_REQUIRE_NEW_HIGH` | `true` | 신고가 필터 |
+| `K2_PLUS_MAX_WATCH` | `5` | 최대 추적 종목 |
+
+우선순위: **K1 실전 > K1플러스 > K2플러스 > K2 > 상한가 리바운딩**.
 
 ---
 
@@ -204,7 +223,7 @@
 ### 그대로 유지해도 되는 것 (예시)
 
 - `MAX_TOTAL_AMOUNT`, `MAX_BUY_AMOUNT`, `MAX_CLOSING_AMOUNT`, `MAX_CLOSING_BUY`
-- `ENABLE_INTRADAY_AI`, `ENABLE_CRASH_BOUNCE`, `ENABLE_V_REVERSAL`, `ENABLE_UL_REBOUND`, `ENABLE_K2_SIM`, `ENABLE_K1_PLUS_SIM`
+- `ENABLE_INTRADAY_AI`, `ENABLE_CRASH_BOUNCE`, `ENABLE_V_REVERSAL`, `ENABLE_UL_REBOUND`, `ENABLE_K2_SIM`, `ENABLE_K1_PLUS_SIM`, `ENABLE_K2_PLUS_SIM`
 - `STOP_LOSS_PCT`, `TAKE_PROFIT_PCT`, `DYNAMIC_CAPITAL`, `BUY_RATIO`
 - `TELEGRAM_*`, `GROQ_API_KEY`, `API_SECRET`
 

@@ -1,11 +1,12 @@
 """
-K1플러스 — 시뮬만 (5장)
+K2플러스 — 시뮬만 (6장)
 
-- 세력봉(거래대금 500억+) 당일, 상한가 케이스는 K1 실전에 양보
-- 5분/일봉 피보: 0.236=K1, 0.5=K2
-- K1 훼손 + 당일 양봉 → 종가대 가상 매수
-- 매수 4일차 전량 가상 청산
-- 실제 주문 없음. 우선순위: K1실전 > K1플러스 > K2플러스 > K2 > 리바운딩
+- 세력봉(거래대금 500억+) 기준, 상한가는 K1 실전에 양보
+- 피보: 0.236=K1, 0.5=K2 — K2 훼손 시 장중 가상 매수
+- 고점갱신일=세력봉일(D1) 포함 4일까지 매수
+- 청산 가정: 매수 4일차 / 고점 익절 / 저점 손절
+- 실제 주문 없음
+- 우선순위: K1실전 > K1플러스 > K2플러스 > K2 > 리바운딩
 """
 from __future__ import annotations
 
@@ -18,7 +19,7 @@ import kis_api
 import k1_closing
 
 KST = ZoneInfo("Asia/Seoul")
-STRATEGY = "K1플러스시뮬"
+STRATEGY = "K2플러스시뮬"
 
 _ETF_KEYWORDS = [
     "KODEX", "TIGER", "KBSTAR", "HANARO", "ARIRANG", "KOSEF",
@@ -42,21 +43,20 @@ def _parse_hhmm(value: str, default_h: int, default_m: int) -> int:
         return default_h * 60 + default_m
 
 
-ENABLED = _env_bool("ENABLE_K1_PLUS_SIM", False)
-ENTRY_START_MIN = _parse_hhmm(os.getenv("K1_PLUS_ENTRY_START", "14:20"), 14, 20)
-ENTRY_END_MIN = _parse_hhmm(os.getenv("K1_PLUS_ENTRY_END", "14:50"), 14, 50)
-MONITOR_START_MIN = _parse_hhmm(os.getenv("K1_PLUS_MONITOR_START", "09:10"), 9, 10)
-MONITOR_END_MIN = _parse_hhmm(os.getenv("K1_PLUS_MONITOR_END", "14:50"), 14, 50)
-MIN_TRADING_VALUE = int(os.getenv("K1_PLUS_MIN_TRADING_VALUE", "50000000000"))
-MIN_DAY_RATE = float(os.getenv("K1_PLUS_MIN_DAY_RATE", "5.0"))  # 세력봉 근사: 당일 +5%↑
-FORCE_SELL_DAY = int(os.getenv("K1_PLUS_FORCE_SELL_DAY", "4"))
-SCAN_TOP_N = int(os.getenv("K1_PLUS_SCAN_TOP", "20"))
-MAX_API_CALLS = int(os.getenv("K1_PLUS_MAX_API_CALLS", "20"))
-MAX_CHART_CHECKS = int(os.getenv("K1_PLUS_MAX_CHART_CHECKS", "5"))
-MAX_WATCH = int(os.getenv("K1_PLUS_MAX_WATCH", "5"))
-LEVEL_TOLERANCE_PCT = float(os.getenv("K1_PLUS_LEVEL_TOLERANCE", "0.5"))
-SIM_AMOUNT = int(os.getenv("K1_PLUS_SIM_AMOUNT", "500000"))
-REQUIRE_NEW_HIGH = _env_bool("K1_PLUS_REQUIRE_NEW_HIGH", True)
+ENABLED = _env_bool("ENABLE_K2_PLUS_SIM", False)
+MONITOR_START_MIN = _parse_hhmm(os.getenv("K2_PLUS_MONITOR_START", "09:10"), 9, 10)
+MONITOR_END_MIN = _parse_hhmm(os.getenv("K2_PLUS_MONITOR_END", "14:45"), 14, 45)
+MIN_TRADING_VALUE = int(os.getenv("K2_PLUS_MIN_TRADING_VALUE", "50000000000"))
+MIN_DAY_RATE = float(os.getenv("K2_PLUS_MIN_DAY_RATE", "5.0"))
+MAX_DAYS_FROM_POWER = int(os.getenv("K2_PLUS_MAX_DAYS_FROM_HIGH", "4"))
+FORCE_SELL_DAY = int(os.getenv("K2_PLUS_FORCE_SELL_DAY", "4"))
+SCAN_TOP_N = int(os.getenv("K2_PLUS_SCAN_TOP", "20"))
+MAX_API_CALLS = int(os.getenv("K2_PLUS_MAX_API_CALLS", "20"))
+MAX_CHART_CHECKS = int(os.getenv("K2_PLUS_MAX_CHART_CHECKS", "5"))
+MAX_WATCH = int(os.getenv("K2_PLUS_MAX_WATCH", "5"))
+LEVEL_TOLERANCE_PCT = float(os.getenv("K2_PLUS_LEVEL_TOLERANCE", "0.5"))
+SIM_AMOUNT = int(os.getenv("K2_PLUS_SIM_AMOUNT", "500000"))
+REQUIRE_NEW_HIGH = _env_bool("K2_PLUS_REQUIRE_NEW_HIGH", True)
 
 
 def is_enabled() -> bool:
@@ -65,13 +65,6 @@ def is_enabled() -> bool:
 
 def is_trading_weekday() -> bool:
     return datetime.now(KST).weekday() < 5
-
-
-def is_entry_window() -> bool:
-    if not ENABLED or not is_trading_weekday():
-        return False
-    t = datetime.now(KST).hour * 60 + datetime.now(KST).minute
-    return ENTRY_START_MIN <= t <= ENTRY_END_MIN
 
 
 def is_monitor_window() -> bool:
@@ -140,6 +133,24 @@ def _trading_days_since(start_date: str) -> int:
     return days
 
 
+def _power_day_number(power_date: str) -> int:
+    """세력봉일=D1"""
+    try:
+        start = datetime.strptime(power_date, "%Y-%m-%d").date()
+    except ValueError:
+        return 0
+    today = datetime.now(KST).date()
+    if today < start:
+        return 0
+    days = 0
+    d = start
+    while d <= today:
+        if d.weekday() < 5:
+            days += 1
+        d += timedelta(days=1)
+    return days
+
+
 def _get_trading_value(d: dict) -> int:
     try:
         return int(d.get("acml_tr_pbmn", 0))
@@ -148,15 +159,15 @@ def _get_trading_value(d: dict) -> int:
 
 
 def _is_ul_like(info: dict) -> bool:
-    if str(info.get("prdy_vrss_sign", "")) == "1":
+    sign = str(info.get("prdy_vrss_sign", ""))
+    if sign == "1":
         return True
     try:
-        rate = float(info.get("prdy_ctrt", 0))
-        if rate >= 29.0:
-            return True
         current = float(info.get("stck_prpr", 0))
         upper = float(info.get("stck_mxpr", 0))
-        return upper > 0 and current >= upper * 0.998
+        if upper > 0 and current >= upper * 0.998:
+            return True
+        return float(info.get("prdy_ctrt", 0)) >= 29.0
     except (ValueError, TypeError):
         return False
 
@@ -165,31 +176,28 @@ def _sort_daily(candles: list[dict]) -> list[dict]:
     return sorted(candles, key=lambda c: c.get("stck_bsop_date", ""))
 
 
-def _format_date(raw: str) -> str:
-    if len(raw) == 8:
-        return f"{raw[:4]}-{raw[4:6]}-{raw[6:8]}"
-    return _today()
-
-
 def _is_new_high(sorted_daily: list[dict], lookback: int = 20) -> bool:
-    """신고가 근사: 오늘 고가 >= 최근 lookback일 고가"""
     if len(sorted_daily) < 2:
-        return True
+        return False
     try:
         today_high = float(sorted_daily[-1].get("stck_hgpr", 0))
-        prev_highs = [
-            float(c.get("stck_hgpr", 0))
-            for c in sorted_daily[-(lookback + 1):-1]
-        ]
-        if not prev_highs or today_high <= 0:
-            return True
-        return today_high >= max(prev_highs) * 0.995
     except (ValueError, TypeError):
+        return False
+    if today_high <= 0:
+        return False
+    prev = sorted_daily[-(lookback + 1):-1] if len(sorted_daily) > 1 else []
+    highs = []
+    for c in prev:
+        try:
+            highs.append(float(c.get("stck_hgpr", 0)))
+        except (ValueError, TypeError):
+            continue
+    if not highs:
         return True
+    return today_high >= max(highs)
 
 
 def _fib_from_power_day(sorted_daily: list[dict]) -> dict | None:
-    """당일 세력봉 기준: 전일 저~당일 고 (또는 당일 저~고)"""
     if not sorted_daily:
         return None
     today = sorted_daily[-1]
@@ -219,22 +227,23 @@ def _fib_from_power_day(sorted_daily: list[dict]) -> dict | None:
     }
 
 
-def _k1_breached(current: float, k1: int) -> bool:
-    if k1 <= 0:
+def _k2_breached(current: float, k2: int) -> bool:
+    if k2 <= 0:
         return False
-    return current <= k1 * (1 + LEVEL_TOLERANCE_PCT / 100)
+    return current <= k2 * (1 + LEVEL_TOLERANCE_PCT / 100)
 
 
-def _is_bullish(info_or_candle: dict, current: float | None = None) -> bool:
+def _higher_priority_codes() -> set[str]:
+    codes = set()
+    if k1_closing.is_enabled():
+        codes |= k1_closing.get_priority_codes()
     try:
-        open_p = float(info_or_candle.get("stck_oprc", 0))
-        close_p = float(
-            current if current is not None
-            else info_or_candle.get("stck_clpr", info_or_candle.get("stck_prpr", 0))
-        )
-        return close_p >= open_p and open_p > 0
-    except (ValueError, TypeError):
-        return False
+        import k1_plus
+        if k1_plus.is_enabled():
+            codes |= k1_plus.get_priority_codes()
+    except Exception:
+        pass
+    return codes
 
 
 def _alert_key(t: str) -> str:
@@ -275,8 +284,8 @@ def _open_sim(entry: dict, price: int) -> dict | None:
         "code": entry["code"],
         "quantity": qty,
         "price": price,
-        "k1": entry.get("k1", 0),
-        "reason": f"[K1+시뮬] 세력봉 당일 양봉종배 K1 {entry.get('k1', 0):,} 훼손",
+        "k2": entry.get("k2", 0),
+        "reason": f"[K2+시뮬] K2 {entry.get('k2', 0):,}원 훼손 @ {price:,}원",
     }
 
 
@@ -315,14 +324,14 @@ def _close_sim(entry: dict, price: int, reason: str) -> dict | None:
 
 
 def scan_new_candidates(api_budget: int | None = None) -> tuple[list[dict], int]:
-    """당일 세력봉(비상한가) 후보 등록"""
+    """당일 세력봉(비상한가) 후보 등록 — K1/K1+ 우선 종목 제외"""
     if not ENABLED or not is_trading_weekday():
         return [], 0
 
     budget = api_budget if api_budget is not None else MAX_API_CALLS
     used = 0
     alerts: list[dict] = []
-    k1_codes = k1_closing.get_priority_codes() if k1_closing.is_enabled() else set()
+    skip_codes = _higher_priority_codes()
 
     try:
         kospi = kis_api.get_top_trading_value(SCAN_TOP_N, market="0001")
@@ -332,7 +341,7 @@ def scan_new_candidates(api_budget: int | None = None) -> tuple[list[dict], int]
         used += 1
         time.sleep(0.3)
     except Exception as e:
-        print(f"[K1+시뮬] 거래대금 조회 실패: {e}")
+        print(f"[K2+시뮬] 거래대금 조회 실패: {e}")
         return [], used
 
     pool: list[dict] = []
@@ -358,7 +367,7 @@ def scan_new_candidates(api_budget: int | None = None) -> tuple[list[dict], int]
         if used >= budget or checks >= MAX_CHART_CHECKS or len(_watchlist) >= MAX_WATCH:
             break
         code, name = item["code"], item["name"]
-        if code in _watchlist or code in k1_codes:
+        if code in _watchlist or code in skip_codes:
             continue
 
         checks += 1
@@ -367,10 +376,9 @@ def scan_new_candidates(api_budget: int | None = None) -> tuple[list[dict], int]
             used += 1
             time.sleep(0.3)
         except Exception as e:
-            print(f"[K1+시뮬] {name} 시세 실패: {e}")
+            print(f"[K2+시뮬] {name} 시세 실패: {e}")
             continue
 
-        # 상한가 → K1 실전 영역, 플러스 스킵
         if _is_ul_like(info):
             continue
         if _get_trading_value(info) < MIN_TRADING_VALUE:
@@ -381,7 +389,7 @@ def scan_new_candidates(api_budget: int | None = None) -> tuple[list[dict], int]
             used += 1
             time.sleep(0.3)
         except Exception as e:
-            print(f"[K1+시뮬] {name} 일봉 실패: {e}")
+            print(f"[K2+시뮬] {name} 일봉 실패: {e}")
             continue
 
         sorted_c = _sort_daily(daily)
@@ -396,6 +404,7 @@ def scan_new_candidates(api_budget: int | None = None) -> tuple[list[dict], int]
             "code": code,
             "name": name,
             "power_date": _today(),
+            "day_num": 1,
             "k1": levels["k1"],
             "k2": levels["k2"],
             "fib_high": levels["fib_high"],
@@ -405,9 +414,9 @@ def scan_new_candidates(api_budget: int | None = None) -> tuple[list[dict], int]
             "first_seen": _today(),
             "alerts_sent": [],
             "reason": (
-                f"세력봉 당일 +{float(info.get('prdy_ctrt', 0)):.1f}% "
+                f"세력봉 D1 +{float(info.get('prdy_ctrt', 0)):.1f}% "
                 f"대금 {_get_trading_value(info) // 100_000_000:,}억 "
-                f"K1 {levels['k1']:,}"
+                f"K2 {levels['k2']:,}"
             ),
         }
         _watchlist[code] = entry
@@ -424,7 +433,7 @@ def scan_new_candidates(api_budget: int | None = None) -> tuple[list[dict], int]
 
 
 def check_alerts(api_budget: int | None = None) -> tuple[list[dict], list[str], int]:
-    """종가대 매수 + 보유 청산 (현재가/시세만)"""
+    """장중 K2 훼손 매수 + 보유 청산"""
     if not ENABLED or not _watchlist or not is_trading_weekday():
         return [], [], 0
 
@@ -432,13 +441,15 @@ def check_alerts(api_budget: int | None = None) -> tuple[list[dict], list[str], 
     used = 0
     alerts: list[dict] = []
     removed: list[str] = []
-    k1_codes = k1_closing.get_priority_codes() if k1_closing.is_enabled() else set()
-    in_entry = is_entry_window()
+    skip_codes = _higher_priority_codes()
 
     for code in list(_watchlist.keys()):
         if used >= budget:
             break
         entry = _watchlist[code]
+        power_date = entry.get("power_date", "")
+        day_num = _power_day_number(power_date)
+        entry["day_num"] = day_num
 
         try:
             info = kis_api.get_stock_info(code)
@@ -446,15 +457,14 @@ def check_alerts(api_budget: int | None = None) -> tuple[list[dict], list[str], 
             time.sleep(0.3)
             current = float(info.get("stck_prpr", 0))
         except Exception as e:
-            print(f"[K1+시뮬] {entry['name']} 시세 실패: {e}")
+            print(f"[K2+시뮬] {entry['name']} 시세 실패: {e}")
             continue
 
         current_i = int(current)
-        k1 = int(entry.get("k1", 0))
+        k2 = int(entry.get("k2", 0))
         fib_high = int(entry.get("fib_high", 0))
         fib_low = int(entry.get("fib_low", 0))
 
-        # ── 보유: 가정 청산 ────────────────────────────────────────────────
         if _sim_is_open(entry):
             buy_day = _trading_days_since(entry["sim"]["buy_date"]) + 1
             if buy_day >= FORCE_SELL_DAY and not _already_sent(entry, "DAY4"):
@@ -491,17 +501,18 @@ def check_alerts(api_budget: int | None = None) -> tuple[list[dict], list[str], 
                     continue
             continue
 
-        # ── 미보유: 당일만, K1 실전 종목 스킵 ───────────────────────────────
-        if code in k1_codes:
+        # 미보유: K1/K1+ 우선 종목은 매수 스킵
+        if code in skip_codes:
             continue
-        if entry.get("power_date") != _today():
+
+        if day_num < 1 or day_num > MAX_DAYS_FROM_POWER:
             if not _already_sent(entry, "EXPIRED"):
                 _mark_sent(entry, "EXPIRED")
                 alerts.append({
                     "type": "EXPIRED",
                     "entry": entry,
                     "current": current_i,
-                    "message": "세력봉 당일 종료 — 미매수 추적 종료",
+                    "message": f"세력봉 후 {MAX_DAYS_FROM_POWER}일 초과 — 미매수 추적 종료",
                     "sim": None,
                 })
             removed.append(code)
@@ -511,19 +522,14 @@ def check_alerts(api_budget: int | None = None) -> tuple[list[dict], list[str], 
             removed.append(code)
             continue
 
-        if (
-            in_entry
-            and _k1_breached(current, k1)
-            and _is_bullish(info, current)
-            and not _already_sent(entry, "BUY")
-        ):
+        if _k2_breached(current, k2) and not _already_sent(entry, "BUY"):
             _mark_sent(entry, "BUY")
             sim = _open_sim(entry, current_i)
             alerts.append({
                 "type": "BUY",
                 "entry": entry,
                 "current": current_i,
-                "message": f"K1 {k1:,} 훼손 + 당일 양봉 → 종가베팅 (시뮬)",
+                "message": f"K2 {k2:,} 훼손 (D{day_num}) → 장중매수 (시뮬)",
                 "sim": sim,
             })
 
@@ -538,32 +544,37 @@ def format_summary() -> list[str]:
     lines: list[str] = []
     if _sim_trades_today:
         net = sum(t["profit_won"] for t in _sim_trades_today)
-        sign = "+" if net >= 0 else ""
         lines.append(
-            f"💠 <b>K1플러스 [시뮬] 오늘 {len(_sim_trades_today)}건</b> → {sign}{net:,}원"
+            f"🔷 <b>K2플러스 [시뮬] 오늘 체결 {len(_sim_trades_today)}건</b> "
+            f"순손익 {_format_won(net)}"
         )
         for t in _sim_trades_today:
             em = "📈" if t["profit_won"] >= 0 else "📉"
             s = "+" if t["profit_won"] >= 0 else ""
             lines.append(
-                f"   {em} {t['name']}({t['code']}) "
-                f"{t['buy_price']:,}→{t['sell_price']:,} {s}{t['profit_pct']}%"
+                f"  {em} {t['name']}: {s}{t['profit_pct']}% "
+                f"({s}{t['profit_won']:,}원) — {t.get('sell_reason', '')}"
             )
     open_sims = [e for e in _watchlist.values() if _sim_is_open(e)]
+    tracking = [e for e in _watchlist.values() if not _sim_is_open(e)]
     if open_sims:
-        lines.append(f"💠 K1+ [시뮬] 보유 {len(open_sims)}개 (4일차 청산)")
-        for e in open_sims[:3]:
-            sim = e["sim"]
-            day = _trading_days_since(sim["buy_date"]) + 1
+        lines.append(f"🔷 K2+ [시뮬] 보유 {len(open_sims)}개 (4일차 청산)")
+        for e in open_sims:
+            day = _trading_days_since(e["sim"]["buy_date"]) + 1
             lines.append(
-                f"   {e['name']}({e['code']}) {sim['buy_price']:,}×{sim['quantity']} (D{day})"
+                f"  · {e['name']} D{day} @ {e['sim']['buy_price']:,} "
+                f"K2 {e.get('k2', 0):,}"
             )
-    waiting = [
-        e for e in _watchlist.values()
-        if not _sim_is_open(e) and e.get("power_date") == _today()
-    ]
-    if waiting:
-        lines.append(f"💠 K1+ 추적 {len(waiting)}개 (세력봉 당일·종가대)")
-        for e in waiting[:3]:
-            lines.append(f"   {e['name']}({e['code']}) K1 {e['k1']:,}")
+    if tracking:
+        lines.append(f"🔷 K2+ 추적만 {len(tracking)}개 (K2 대기)")
+        for e in tracking[:5]:
+            lines.append(
+                f"  · {e['name']} D{e.get('day_num', '?')} "
+                f"K2 {e.get('k2', 0):,}"
+            )
     return lines
+
+
+def _format_won(amount: int) -> str:
+    sign = "+" if amount > 0 else ""
+    return f"{sign}{amount:,}원"

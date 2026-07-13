@@ -33,6 +33,7 @@ import ul_rebound
 import k1_closing
 import k2_intraday
 import k1_plus
+import k2_plus
 
 load_dotenv()
 
@@ -292,6 +293,8 @@ def _save_state() -> None:
         "k2_sim_trades_today": k2_intraday.dump_sim_trades_today(),
         "k1_plus_watchlist": k1_plus.dump_watchlist(),
         "k1_plus_sim_trades_today": k1_plus.dump_sim_trades_today(),
+        "k2_plus_watchlist": k2_plus.dump_watchlist(),
+        "k2_plus_sim_trades_today": k2_plus.dump_sim_trades_today(),
         "daily_pnl_ledger": _daily_pnl_ledger,
     }
     try:
@@ -349,6 +352,10 @@ def _load_state() -> None:
         if k1_plus.get_watchlist():
             print(f"[상태 복원] K1플러스 시뮬 추적 {len(k1_plus.get_watchlist())}개 불러옴")
 
+        k2_plus.load_watchlist(state.get("k2_plus_watchlist", {}))
+        if k2_plus.get_watchlist():
+            print(f"[상태 복원] K2플러스 시뮬 추적 {len(k2_plus.get_watchlist())}개 불러옴")
+
         if state.get("date") == _today_kst():
             ul_rebound.load_sim_trades_today(state.get("ul_rebound_sim_trades_today", []))
             if ul_rebound.get_sim_trades_today():
@@ -368,6 +375,12 @@ def _load_state() -> None:
                 print(
                     f"[상태 복원] K1플러스 시뮬 체결 "
                     f"{len(k1_plus.get_sim_trades_today())}건 불러옴"
+                )
+            k2_plus.load_sim_trades_today(state.get("k2_plus_sim_trades_today", []))
+            if k2_plus.get_sim_trades_today():
+                print(
+                    f"[상태 복원] K2플러스 시뮬 체결 "
+                    f"{len(k2_plus.get_sim_trades_today())}건 불러옴"
                 )
 
         ledger = state.get("daily_pnl_ledger", [])
@@ -405,8 +418,9 @@ def _collect_sim_pnl_today() -> tuple[int, int, list[tuple[str, int, int]]]:
     buckets = [
         ("상한가 리바운드", ul_rebound.get_sim_trades_today()),
         ("K1 종가", k1_closing.get_sim_trades_today()),
-        ("K2", k2_intraday.get_sim_trades_today()),
         ("K1플러스", k1_plus.get_sim_trades_today()),
+        ("K2플러스", k2_plus.get_sim_trades_today()),
+        ("K2", k2_intraday.get_sim_trades_today()),
     ]
     details: list[tuple[str, int, int]] = []
     total_won = 0
@@ -985,6 +999,9 @@ def run_market_check() -> None:
     if k1_plus.is_monitor_window():
         _check_k1_plus_sim_alerts()
 
+    if k2_plus.is_monitor_window():
+        _check_k2_plus_sim_alerts()
+
     _check_k1_closing_exit()
 
     if is_entry_time():
@@ -1080,6 +1097,15 @@ def run_status_report() -> None:
                 f"K1플러스 [시뮬]: 추적 {len(k1_plus.get_watchlist())}개 / "
                 f"보유 {open_p}개 / 오늘 {len(k1_plus.get_sim_trades_today())}건"
             )
+        if k2_plus.is_enabled():
+            open_kp = sum(
+                1 for e in k2_plus.get_watchlist().values()
+                if e.get("sim", {}).get("status") == "open"
+            )
+            lines.append(
+                f"K2플러스 [시뮬]: 추적 {len(k2_plus.get_watchlist())}개 / "
+                f"보유 {open_kp}개 / 오늘 {len(k2_plus.get_sim_trades_today())}건"
+            )
         if pos_lines:
             lines.append("📌 장중 보유 종목:")
             lines.extend(pos_lines)
@@ -1145,6 +1171,10 @@ def run_closing_report() -> None:
         plus_lines = k1_plus.format_summary()
         if plus_lines:
             lines.extend(plus_lines)
+            lines.append("")
+        k2p_lines = k2_plus.format_summary()
+        if k2p_lines:
+            lines.extend(k2p_lines)
             lines.append("")
         if not _watchlist:
             summary = _last_morning_summary
@@ -1262,6 +1292,11 @@ def run_closing_report() -> None:
     if plus_lines:
         lines.append("")
         lines.extend(plus_lines)
+
+    k2p_lines = k2_plus.format_summary()
+    if k2p_lines:
+        lines.append("")
+        lines.extend(k2p_lines)
 
     notifier.send("\n".join(lines))
     if datetime.now(KST).weekday() == 4:
@@ -1832,6 +1867,65 @@ def _check_k1_plus_sim_alerts() -> None:
         print(f"[K1+시뮬] 체크 오류: {e}")
 
 
+def _send_k2_plus_alerts(alerts: list[dict]) -> None:
+    for alert in alerts:
+        entry = alert["entry"]
+        sim = alert.get("sim")
+        notifier.notify_k2_plus_alert(
+            alert["type"],
+            entry["name"],
+            entry["code"],
+            alert.get("current", 0),
+            entry,
+            alert.get("message", ""),
+        )
+        if not sim:
+            continue
+        if sim.get("action") == "buy":
+            notifier.notify_k2_plus_sim_buy(
+                sim["name"], sim["code"], sim["quantity"],
+                sim["price"], sim.get("k2", 0), sim["reason"],
+            )
+        elif sim.get("action") == "sell":
+            notifier.notify_k2_plus_sim_sell(
+                sim["name"], sim["code"], sim["quantity"],
+                sim["buy_price"], sim["sell_price"],
+                sim["profit_pct"], sim["profit_won"],
+                sim["sell_reason"],
+            )
+
+
+def run_k2_plus_morning_scan() -> None:
+    """09:05 — K2플러스 세력봉 후보 스캔"""
+    if not k2_plus.is_enabled() or not is_trading_day():
+        return
+    try:
+        new_alerts, api_used = k2_plus.scan_new_candidates()
+        print(f"[K2+시뮬] 오전 스캔 신규 {len(new_alerts)}개 (API {api_used}회)")
+        if new_alerts:
+            _send_k2_plus_alerts(new_alerts)
+            _save_state()
+    except Exception as e:
+        print(f"[K2+시뮬] 스캔 오류: {e}")
+        notifier.notify_error(f"K2플러스 시뮬 스캔 오류: {e}")
+
+
+def _check_k2_plus_sim_alerts() -> None:
+    if not k2_plus.is_enabled() or not k2_plus.is_monitor_window():
+        return
+    try:
+        alerts, removed, api_used = k2_plus.check_alerts()
+        if alerts:
+            _send_k2_plus_alerts(alerts)
+            _save_state()
+            print(
+                f"[K2+시뮬] 알림 {len(alerts)}건 "
+                f"(제거 {len(removed)}개, API {api_used}회)"
+            )
+    except Exception as e:
+        print(f"[K2+시뮬] 체크 오류: {e}")
+
+
 # ── K1 종가베팅 (금·월 실전 + 시뮬) ───────────────────────────────────────────
 
 def run_k1_closing_screening() -> None:
@@ -2281,6 +2375,7 @@ def _reset_daily_state() -> None:
     k1_closing.reset_daily_sim_trades()
     k2_intraday.reset_daily_sim_trades()
     k1_plus.reset_daily_sim_trades()
+    k2_plus.reset_daily_sim_trades()
     _save_state()
     print(f"[일별 초기화] {_today_kst()} 새 거래일 시작")
 
@@ -2343,6 +2438,12 @@ def main():
             f"\n💠 K1플러스: [시뮬만] / 추적 {len(k1_plus.get_watchlist())}개 / "
             f"세력봉 당일 양봉종가"
         )
+    k2p_note = ""
+    if k2_plus.is_enabled():
+        k2p_note = (
+            f"\n🔷 K2플러스: [시뮬만] / 추적 {len(k2_plus.get_watchlist())}개 / "
+            f"세력봉 D1~D{k2_plus.MAX_DAYS_FROM_POWER} K2훼손"
+        )
     k1_pos_note = ""
     if _k1_closing_positions:
         k1_pos_note = f"\n🔷 K1 종가 보유 {len(_k1_closing_positions)}개 (4일 보유)"
@@ -2366,6 +2467,7 @@ def main():
         f"{k1_note}"
         f"{k2_note}"
         f"{plus_note}"
+        f"{k2p_note}"
         f"{closing_pos_note}"
         f"{k1_pos_note}"
     )
@@ -2390,9 +2492,11 @@ def main():
             notifier.send("▶️ 봇 재시작 감지 (스크리닝 시간) - 즉시 스크리닝 실행")
             if run_morning_screening():
                 _last_ran["screening_ok"] = _init_today
-                run_ul_rebound_morning_scan()
-                run_k2_morning_scan()
+                # 우선순위 A: K1+ > K2+ > K2 > UL (높은 쪽 먼저 선점)
                 run_k1_plus_morning_scan()
+                run_k2_plus_morning_scan()
+                run_k2_morning_scan()
+                run_ul_rebound_morning_scan()
 
     last_5min_slot = -1       # 장중매매 5분 슬롯
     last_closing_slot = -1    # 종가베팅 5분 슬롯
@@ -2423,9 +2527,11 @@ def main():
                 last_screening_slot = slot
                 if run_morning_screening():
                     _last_ran["screening_ok"] = today
+                    # 우선순위 A: K1+ > K2+ > K2 > UL (높은 쪽 먼저 선점)
+                    run_k1_plus_morning_scan()
+                    run_k2_plus_morning_scan()
+                    run_k2_morning_scan()
                     run_ul_rebound_morning_scan()
-                run_k2_morning_scan()
-                run_k1_plus_morning_scan()
 
         # ── 09:10~14:45 KST - 5분마다 장중 진입/청산 체크 ───────────────────
         if 9 * 60 + 10 <= t <= 14 * 60 + 45:

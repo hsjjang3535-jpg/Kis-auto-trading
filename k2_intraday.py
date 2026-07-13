@@ -4,7 +4,7 @@ K2 장중 매매 — 시뮬만 (4장 K2매매)
 - 피보 0.5선(K2) 훼손 시 가상 매수
 - 고점갱신일 = 상한가일 (Day1), 상한가일 포함 4일까지 매수 가능
 - 청산 가정: 4일차 강제 / 피보 고점 익절 / 피보 저점 손절
-- 실제 주문 없음. 우선순위: K1 > K2 > 상한가 리바운딩
+- 실제 주문 없음. 우선순위: K1 > K1플러스 > K2플러스 > K2 > 상한가 리바운딩
 - API: 등록 시 일봉 1회, 장중은 현재가만
 """
 from __future__ import annotations
@@ -302,6 +302,12 @@ def scan_new_candidates(api_budget: int | None = None) -> tuple[list[dict], int]
             k1_codes |= k1_plus.get_priority_codes()
     except Exception:
         pass
+    try:
+        import k2_plus
+        if k2_plus.is_enabled():
+            k1_codes |= k2_plus.get_priority_codes()
+    except Exception:
+        pass
 
     try:
         kospi = kis_api.get_top_trading_value(SCAN_TOP_N, market="0001")
@@ -403,6 +409,12 @@ def check_alerts(api_budget: int | None = None) -> tuple[list[dict], list[str], 
             k1_codes |= k1_plus.get_priority_codes()
     except Exception:
         pass
+    try:
+        import k2_plus
+        if k2_plus.is_enabled():
+            k1_codes |= k2_plus.get_priority_codes()
+    except Exception:
+        pass
 
     for code in list(_watchlist.keys()):
         if used >= budget:
@@ -410,7 +422,7 @@ def check_alerts(api_budget: int | None = None) -> tuple[list[dict], list[str], 
 
         entry = _watchlist[code]
         if code in k1_codes:
-            # K1/K1+ 우선 — 시뮬 매수는 하지 않음 (open이면 청산만)
+            # K1/K1+/K2+ 우선 — 시뮬 매수는 하지 않음 (open이면 청산만)
             pass
 
         ul_date = entry.get("ul_date", "")

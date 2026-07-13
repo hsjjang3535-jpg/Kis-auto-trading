@@ -6,6 +6,7 @@ PDF 규칙:
   R1 매수 → R0 익절, R2 1:1 추가매수, R3 손절, 매수 후 4일차 강제청산
   상한가 후 7거래일 이내 추적, 거래대금 500억+ 필터
   신규 상장주(일봉 부족·전일종가 없음)는 제외
+  우선순위: K1실전 > K1플러스 > K2플러스 > K2 > 리바운딩
 """
 from __future__ import annotations
 
@@ -484,11 +485,14 @@ def scan_new_candidates(api_budget: int | None = None) -> tuple[list[dict], int]
     import k1_closing
     import k2_intraday
     import k1_plus
+    import k2_plus
     priority_codes = set()
     if k1_closing.is_enabled():
         priority_codes |= k1_closing.get_priority_codes()
     if k1_plus.is_enabled():
         priority_codes |= k1_plus.get_priority_codes()
+    if k2_plus.is_enabled():
+        priority_codes |= k2_plus.get_priority_codes()
     if k2_intraday.is_enabled():
         priority_codes |= k2_intraday.get_priority_codes()
 
@@ -653,11 +657,14 @@ def check_level_alerts(api_budget: int | None = None) -> tuple[list[dict], list[
     import k1_closing
     import k2_intraday
     import k1_plus
+    import k2_plus
     priority_codes = set()
     if k1_closing.is_enabled():
         priority_codes |= k1_closing.get_priority_codes()
     if k1_plus.is_enabled():
         priority_codes |= k1_plus.get_priority_codes()
+    if k2_plus.is_enabled():
+        priority_codes |= k2_plus.get_priority_codes()
     if k2_intraday.is_enabled():
         priority_codes |= k2_intraday.get_priority_codes()
 
