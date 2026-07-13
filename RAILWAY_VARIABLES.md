@@ -111,6 +111,7 @@
 | `UL_REBOUND_MONITOR_END` | `15:30` | 모니터링 종료 |
 | `UL_REBOUND_MIN_TRADING_VALUE` | `50000000000` | 거래대금 500억+ |
 | `UL_REBOUND_WINDOW_DAYS` | `7` | 상한가 후 추적 일수 |
+| `UL_REBOUND_MIN_HISTORY_DAYS` | `2` | 일봉 최소 일수 (미만=신규상장 제외) |
 | `UL_REBOUND_FORCE_SELL_DAY` | `4` | 4거래일차 청산 알림 |
 | `UL_REBOUND_SCAN_TOP` | `30` | 거래대금 상위 N |
 | `UL_REBOUND_MAX_API_CALLS` | `25` | 스캔당 API 상한 |

@@ -5,6 +5,7 @@ PDF 규칙:
   R0 = 상한가, R1/R2/R3 = (R0 - 상한가 이후 저점) 3등분
   R1 매수 → R0 익절, R2 1:1 추가매수, R3 손절, 매수 후 4일차 강제청산
   상한가 후 7거래일 이내 추적, 거래대금 500억+ 필터
+  신규 상장주(일봉 부족·전일종가 없음)는 제외
 """
 from __future__ import annotations
 
@@ -54,6 +55,8 @@ MAX_CHART_CHECKS = int(os.getenv("UL_REBOUND_MAX_CHART_CHECKS", "8"))
 LEVEL_TOLERANCE_PCT = float(os.getenv("UL_REBOUND_LEVEL_TOLERANCE", "0.5"))
 SIM_AMOUNT = int(os.getenv("UL_REBOUND_SIM_AMOUNT", "500000"))
 SIM_ENABLED = _env_bool("UL_REBOUND_SIM_ENABLED", True)
+# 일봉 N일 미만(신규 상장 당일 등)은 R0~R3 불가 → 스캔 제외
+MIN_HISTORY_DAYS = int(os.getenv("UL_REBOUND_MIN_HISTORY_DAYS", "2"))
 
 
 def is_enabled() -> bool:
@@ -157,6 +160,27 @@ def _get_trading_value(info_or_candle: dict) -> int:
 
 def _sort_daily(candles: list[dict]) -> list[dict]:
     return sorted(candles, key=lambda c: c.get("stck_bsop_date", ""))
+
+
+def _is_new_listing(sorted_daily: list[dict]) -> bool:
+    """전일 종가 없는 신규 상장(일봉 부족) — 상한가 리바운딩 대상 아님"""
+    dates = {
+        str(c.get("stck_bsop_date", "")).strip()
+        for c in sorted_daily
+        if str(c.get("stck_bsop_date", "")).strip()
+    }
+    return len(dates) < MIN_HISTORY_DAYS
+
+
+def _levels_collapsed(levels: dict) -> bool:
+    """당일 상한가 placeholder(R0=R1=R2=R3) — 매매선 무효"""
+    try:
+        vals = [int(levels.get(k, 0)) for k in ("r0", "r1", "r2", "r3")]
+    except (TypeError, ValueError):
+        return True
+    if min(vals) <= 0:
+        return True
+    return len(set(vals)) == 1
 
 
 def _find_ul_day(candles: list[dict]) -> tuple[dict | None, list[dict]]:
@@ -519,21 +543,51 @@ def scan_new_candidates(api_budget: int | None = None) -> tuple[list[dict], int]
         today_ul = _is_at_upper_limit(info)
         today_tv = _get_trading_value(info)
 
+        # 일봉 이력 확인 — 신규 상장주(전일 없음)는 상한가 리바운드 제외
+        try:
+            daily = kis_api.get_daily_chart(code, days=30)
+            used += 1
+            time.sleep(0.3)
+        except Exception as e:
+            print(f"[상한가리바운드] {name} 일봉 실패: {e}")
+            continue
+
+        sorted_daily = _sort_daily(daily)
+        if _is_new_listing(sorted_daily):
+            print(f"[상한가리바운드] {name} 신규상장(일봉<{MIN_HISTORY_DAYS}일) — 스킵")
+            continue
+
         if today_ul and today_tv >= MIN_TRADING_VALUE:
             try:
                 current = float(info.get("stck_prpr", 0))
-                r0 = int(float(info.get("stck_mxpr", 0)) or current)
+                ul_high = float(info.get("stck_mxpr", 0)) or float(
+                    info.get("stck_hgpr", 0)
+                ) or current
             except (ValueError, TypeError):
                 continue
 
+            prev = sorted_daily[-2]
+            try:
+                prev_close = float(prev.get("stck_clpr", 0))
+            except (ValueError, TypeError):
+                prev_close = 0.0
+            if prev_close <= 0 or prev_close >= ul_high:
+                print(f"[상한가리바운드] {name} 전일종가 불가 — 스킵")
+                continue
+
+            range_ = int(ul_high) - int(prev_close)
             levels = {
-                "r0": r0,
-                "r1": r0,
-                "r2": r0,
-                "r3": r0,
-                "post_ul_low": r0,
-                "range": 0,
+                "r0": int(ul_high),
+                "r1": int(ul_high - range_ / 3),
+                "r2": int(ul_high - 2 * range_ / 3),
+                "r3": int(prev_close),
+                "post_ul_low": int(prev_close),
+                "range": range_,
             }
+            if _levels_collapsed(levels):
+                print(f"[상한가리바운드] {name} R선 무효 — 스킵")
+                continue
+
             entry = _add_to_watchlist(
                 code, name, _today(), levels, today_tv,
                 f"당일 상한가 (거래대금 {today_tv // 100_000_000:,}억)",
@@ -548,19 +602,14 @@ def scan_new_candidates(api_budget: int | None = None) -> tuple[list[dict], int]
                 })
             continue
 
-        try:
-            daily = kis_api.get_daily_chart(code, days=30)
-            used += 1
-            time.sleep(0.3)
-        except Exception as e:
-            print(f"[상한가리바운드] {name} 일봉 실패: {e}")
-            continue
-
-        ul_candle, after = _find_ul_day(daily)
+        ul_candle, after = _find_ul_day(sorted_daily)
         if not ul_candle:
             continue
 
         levels = compute_levels(ul_candle, after)
+        if _levels_collapsed(levels):
+            print(f"[상한가리바운드] {name} R선 무효 — 스킵")
+            continue
         ul_date = _format_ul_date(ul_candle)
         ul_tv = _get_trading_value(ul_candle)
 
@@ -616,6 +665,22 @@ def check_level_alerts(api_budget: int | None = None) -> tuple[list[dict], list[
     used = 0
     alerts: list[dict] = []
     removed: list[str] = []
+
+    # 이미 등록된 신규상장/R선 붕괴 종목 정리 (레메디 등)
+    for code, entry in list(_watchlist.items()):
+        levels = {
+            "r0": entry.get("r0", 0),
+            "r1": entry.get("r1", 0),
+            "r2": entry.get("r2", 0),
+            "r3": entry.get("r3", 0),
+        }
+        if _levels_collapsed(levels):
+            print(
+                f"[상한가리바운드] {entry.get('name', code)} "
+                f"R선 무효(신규상장 등) — 추적 제거"
+            )
+            removed.append(code)
+            _watchlist.pop(code, None)
 
     for code in list(_watchlist.keys()):
         if used >= budget:
