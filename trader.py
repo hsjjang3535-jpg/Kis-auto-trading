@@ -11,12 +11,12 @@
   14:00 - 종가베팅 스크리닝
   14:20 ~ 14:50 - 5분마다 종가베팅 매수 체크
   14:50 - 장중매매 잔여 포지션 강제 청산 (종가베팅 제외)
-  15:10 - 장마감 손익 보고
+  15:10 - 장마감 손익 보고 (손익금) / 금요일 주간 총손익
 """
 import os
 import json
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
@@ -257,6 +257,10 @@ _closing_balance_fail_notified: bool = False    # 예수금 조회 실패 알림
 # { name, code, quantity, buy_price, sell_price, profit_pct, profit_won, reason, strategy }
 _trades_today: list[dict] = []
 
+# 일별 손익 장부 (주간 합산용)
+# [{date, profit_won, trades, sim_profit_won, sim_trades}]
+_daily_pnl_ledger: list[dict] = []
+
 # 오늘 스크리닝 요약 (0개일 때 이유 보고용)
 _last_morning_summary: dict = {}
 _last_closing_summary: dict = {}
@@ -288,6 +292,7 @@ def _save_state() -> None:
         "k2_sim_trades_today": k2_intraday.dump_sim_trades_today(),
         "k1_plus_watchlist": k1_plus.dump_watchlist(),
         "k1_plus_sim_trades_today": k1_plus.dump_sim_trades_today(),
+        "daily_pnl_ledger": _daily_pnl_ledger,
     }
     try:
         with open(_STATE_FILE, "w", encoding="utf-8") as f:
@@ -300,6 +305,7 @@ def _load_state() -> None:
     global _positions, _total_invested_today, _trades_today
     global _closing_positions, _closing_invested_today, _crash_bounce_invested_today
     global _v_reversal_invested_today, _k1_closing_positions
+    global _daily_pnl_ledger
     if not os.path.exists(_STATE_FILE):
         return
     try:
@@ -314,6 +320,9 @@ def _load_state() -> None:
                 "모의/실전 포지션 상태를 불러오지 않습니다"
             )
             return
+
+        # 손익 장부는 모드 전환과 무관하게 유지하지 않음(실전/모의 혼동 방지)
+        # → 동일 모드일 때만 아래에서 복원
 
         # 종가베팅 포지션은 날짜와 무관하게 항상 불러옴 (오버나이트 포지션)
         _closing_positions = state.get("closing_positions", {})
@@ -361,6 +370,15 @@ def _load_state() -> None:
                     f"{len(k1_plus.get_sim_trades_today())}건 불러옴"
                 )
 
+        ledger = state.get("daily_pnl_ledger", [])
+        if isinstance(ledger, list):
+            _daily_pnl_ledger = [
+                e for e in ledger
+                if isinstance(e, dict) and e.get("date") and "profit_won" in e
+            ]
+            if _daily_pnl_ledger:
+                print(f"[상태 복원] 일별 손익 장부 {len(_daily_pnl_ledger)}일 불러옴")
+
         # 장중 포지션은 오늘 날짜인 경우만
         if state.get("date") == _today_kst():
             _positions = state.get("positions", {})
@@ -375,6 +393,124 @@ def _load_state() -> None:
                 print(f"[상태 복원] 오늘 체결 {len(_trades_today)}건 불러옴")
     except Exception as e:
         print(f"[상태 불러오기 오류] {e}")
+
+
+def _format_won(amount: int) -> str:
+    sign = "+" if amount > 0 else ""
+    return f"{sign}{amount:,}원"
+
+
+def _collect_sim_pnl_today() -> tuple[int, int, list[tuple[str, int, int]]]:
+    """시뮬 전략별 오늘 손익. Returns: (합계원, 합계건수, [(라벨, 원, 건), ...])"""
+    buckets = [
+        ("상한가 리바운드", ul_rebound.get_sim_trades_today()),
+        ("K1 종가", k1_closing.get_sim_trades_today()),
+        ("K2", k2_intraday.get_sim_trades_today()),
+        ("K1플러스", k1_plus.get_sim_trades_today()),
+    ]
+    details: list[tuple[str, int, int]] = []
+    total_won = 0
+    total_n = 0
+    for label, trades in buckets:
+        sells = [
+            t for t in trades
+            if isinstance(t, dict) and t.get("action", "sell") != "buy"
+            and "profit_won" in t
+        ]
+        # 일부 모듈은 action 없이 sell만 append
+        if not sells:
+            sells = [t for t in trades if isinstance(t, dict) and "profit_won" in t]
+        if not sells:
+            continue
+        won = sum(int(t.get("profit_won", 0)) for t in sells)
+        n = len(sells)
+        details.append((label, won, n))
+        total_won += won
+        total_n += n
+    return total_won, total_n, details
+
+
+def _record_daily_pnl(
+    date_str: str,
+    profit_won: int,
+    trades: int,
+    sim_profit_won: int = 0,
+    sim_trades: int = 0,
+) -> None:
+    """오늘 실전·시뮬 손익을 장부에 기록(같은 날이면 갱신)"""
+    global _daily_pnl_ledger
+    entry = {
+        "date": date_str,
+        "profit_won": int(profit_won),
+        "trades": int(trades),
+        "sim_profit_won": int(sim_profit_won),
+        "sim_trades": int(sim_trades),
+    }
+    updated = False
+    for i, row in enumerate(_daily_pnl_ledger):
+        if row.get("date") == date_str:
+            _daily_pnl_ledger[i] = entry
+            updated = True
+            break
+    if not updated:
+        _daily_pnl_ledger.append(entry)
+    _daily_pnl_ledger = sorted(_daily_pnl_ledger, key=lambda x: x["date"])[-40:]
+    _save_state()
+
+
+def _week_mon_fri_dates(ref: datetime | None = None) -> list[str]:
+    """해당 주의 월~금 날짜 문자열 목록"""
+    now = ref or datetime.now(KST)
+    monday = (now - timedelta(days=now.weekday())).date()
+    return [(monday + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(5)]
+
+
+def run_weekly_pnl_report() -> None:
+    """금요일 장마감 — 이번 주(월~금) 실전·시뮬 총 손익금"""
+    now = datetime.now(KST)
+    if now.weekday() != 4:
+        return
+
+    week_dates = _week_mon_fri_dates(now)
+    by_date = {e["date"]: e for e in _daily_pnl_ledger}
+    lines = [
+        f"📅 <b>주간 손익 보고</b> ({week_dates[0]} ~ {week_dates[4]})\n",
+        "━━ 💰 실전 ━━",
+    ]
+    live_total = 0
+    live_trades = 0
+    for d in week_dates:
+        row = by_date.get(d)
+        if row is None:
+            lines.append(f"  {d}: 기록 없음")
+            continue
+        live_total += int(row.get("profit_won", 0))
+        live_trades += int(row.get("trades", 0))
+        lines.append(
+            f"  {d}: {_format_won(int(row.get('profit_won', 0)))} "
+            f"({int(row.get('trades', 0))}건)"
+        )
+    lines.append(f"💰 <b>이번 주 실전 총 손익금: {_format_won(live_total)}</b>")
+    lines.append(f"실전 매매: {live_trades}건\n")
+
+    lines.append("━━ 🧪 시뮬 ━━")
+    sim_total = 0
+    sim_trades = 0
+    for d in week_dates:
+        row = by_date.get(d)
+        if row is None:
+            lines.append(f"  {d}: 기록 없음")
+            continue
+        sim_total += int(row.get("sim_profit_won", 0))
+        sim_trades += int(row.get("sim_trades", 0))
+        lines.append(
+            f"  {d}: {_format_won(int(row.get('sim_profit_won', 0)))} "
+            f"({int(row.get('sim_trades', 0))}건)"
+        )
+    lines.append(f"🧪 <b>이번 주 시뮬 총 손익금: {_format_won(sim_total)}</b>")
+    lines.append(f"시뮬 매매: {sim_trades}건")
+    notifier.send("\n".join(lines))
+    print(f"[주간손익] 실전 {live_total:,}원 / 시뮬 {sim_total:,}원")
 
 
 # ── 유틸 ──────────────────────────────────────────────────────────────────────
@@ -987,6 +1123,13 @@ def run_closing_report() -> None:
             lines.append("")
         else:
             lines.append("매매 없음 (체결 종목 없음)\n")
+        sim_net, sim_n, sim_details = _collect_sim_pnl_today()
+        lines.append(f"💰 <b>오늘 실전 손익금: {_format_won(0)}</b>")
+        lines.append(f"🧪 <b>오늘 시뮬 손익금: {_format_won(sim_net)}</b> ({sim_n}건)")
+        for label, won, n in sim_details:
+            lines.append(f"   · {label}: {_format_won(won)} ({n}건)")
+        lines.append("")
+        _record_daily_pnl(today, 0, 0, sim_net, sim_n)
         ul_lines = ul_rebound.format_watchlist_summary()
         if ul_lines:
             lines.extend(ul_lines)
@@ -1024,6 +1167,8 @@ def run_closing_report() -> None:
                 skip = s.get("_skip_reason", "진입조건 미충족")
                 lines.append(f"  ❌ {s['name']}({s.get('strategy','')}): {skip}")
         notifier.send("\n".join(lines))
+        if datetime.now(KST).weekday() == 4:
+            run_weekly_pnl_report()
         return
 
     win_trades  = [t for t in _trades_today if t["profit_won"] > 0]
@@ -1036,6 +1181,13 @@ def run_closing_report() -> None:
     closing_bet = [t for t in _trades_today if t.get("strategy") == "종가베팅"]
 
     lines = [f"📋 <b>오늘 장마감 보고 ({today})</b>\n"]
+    sim_net, sim_n, sim_details = _collect_sim_pnl_today()
+    lines.append(f"💰 <b>오늘 실전 손익금: {_format_won(net)}</b>")
+    lines.append(f"🧪 <b>오늘 시뮬 손익금: {_format_won(sim_net)}</b> ({sim_n}건)")
+    for label, won, n in sim_details:
+        lines.append(f"   · {label}: {_format_won(won)} ({n}건)")
+    lines.append("")
+    _record_daily_pnl(today, net, len(_trades_today), sim_net, sim_n)
 
     if intraday:
         lines.append("━━ 📈 장중매매 ━━")
@@ -1088,8 +1240,8 @@ def run_closing_report() -> None:
     lines.append(f"총 매매: {len(_trades_today)}건 (장중 {len(intraday)} + 종가베팅 {len(closing_bet)})")
     lines.append(f"  익절 {len(win_trades)}건: +{total_profit:,}원")
     lines.append(f"  손절 {len(lose_trades)}건: {total_loss:,}원")
-    net_sign = "+" if net >= 0 else ""
-    lines.append(f"\n🏁 오늘 순손익: <b>{net_sign}{net:,}원</b>")
+    lines.append(f"\n🏁 오늘 실전 손익금: <b>{_format_won(net)}</b>")
+    lines.append(f"🧪 오늘 시뮬 손익금: <b>{_format_won(sim_net)}</b> ({sim_n}건)")
 
     ul_lines = ul_rebound.format_watchlist_summary()
     if ul_lines:
@@ -1112,6 +1264,8 @@ def run_closing_report() -> None:
         lines.extend(plus_lines)
 
     notifier.send("\n".join(lines))
+    if datetime.now(KST).weekday() == 4:
+        run_weekly_pnl_report()
 
 
 def run_force_close() -> None:
