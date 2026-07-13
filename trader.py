@@ -480,10 +480,109 @@ def _update_capital() -> None:
         print(f"[자금관리] 예수금 조회 오류: {e}")
 
 
+def _account_holding_qty() -> dict[str, int] | None:
+    """계좌 실보유 수량. 조회 실패 시 None (오인식 방지)."""
+    try:
+        rows = kis_api.get_holdings()
+    except Exception as e:
+        print(f"[포지션동기화] 보유조회 실패: {e}")
+        return None
+
+    qty_map: dict[str, int] = {}
+    for row in rows or []:
+        code = str(row.get("pdno") or row.get("mksc_shrn_iscd") or "").strip()
+        if not code:
+            continue
+        try:
+            qty = int(float(row.get("hldg_qty") or 0))
+        except (TypeError, ValueError):
+            qty = 0
+        if qty > 0:
+            qty_map[code] = qty_map.get(code, 0) + qty
+    return qty_map
+
+
+def _record_manual_sell(code: str, pos: dict, strategy: str, store: dict) -> None:
+    """계좌에 없으면 봇 포지션을 수동매도로 정리"""
+    name = pos.get("name", code)
+    quantity = int(pos.get("quantity") or 0)
+    buy_price = int(pos.get("buy_price") or 0)
+    sell_price = buy_price
+    profit_pct = 0.0
+    try:
+        current = kis_api.get_current_price(code, fallback=buy_price)
+        if current > 0 and buy_price > 0:
+            sell_price = int(current)
+            profit_pct = (current - buy_price) / buy_price * 100
+    except Exception:
+        pass
+
+    profit_won = int((sell_price - buy_price) * quantity) if quantity else 0
+    reason = "수동매도 인식 (계좌 미보유)"
+    _trades_today.append({
+        "name": name,
+        "code": code,
+        "quantity": quantity,
+        "buy_price": buy_price,
+        "sell_price": sell_price,
+        "profit_pct": round(profit_pct, 2),
+        "profit_won": profit_won,
+        "buy_reason": pos.get("buy_reason", ""),
+        "sell_reason": reason,
+        "strategy": strategy,
+    })
+    store.pop(code, None)
+    notifier.notify_sell(name, code, quantity, profit_pct, reason)
+    print(f"[포지션동기화] {name}({code}) {reason}")
+
+
+def reconcile_positions_with_account(notify_empty: bool = False) -> list[str]:
+    """
+    봇 기록 포지션 중 계좌에 없는 종목을 수동매도로 정리.
+    장중 / AI종가 / K1종가 모두 대상.
+    """
+    qty_map = _account_holding_qty()
+    if qty_map is None:
+        return []
+
+    cleared: list[str] = []
+    for code, pos in list(_positions.items()):
+        if qty_map.get(code, 0) <= 0:
+            _record_manual_sell(code, pos, pos.get("strategy", "장중매매"), _positions)
+            cleared.append(code)
+
+    for code, pos in list(_closing_positions.items()):
+        if qty_map.get(code, 0) <= 0:
+            _record_manual_sell(code, pos, "종가베팅", _closing_positions)
+            cleared.append(code)
+
+    for code, pos in list(_k1_closing_positions.items()):
+        if qty_map.get(code, 0) <= 0:
+            _record_manual_sell(
+                code, pos, pos.get("strategy", k1_closing.STRATEGY), _k1_closing_positions,
+            )
+            cleared.append(code)
+
+    if cleared:
+        _save_state()
+        print(f"[포지션동기화] 수동매도 인식 {len(cleared)}건: {', '.join(cleared)}")
+    elif notify_empty:
+        print("[포지션동기화] 봇 포지션 ↔ 계좌 일치 (정리 없음)")
+    return cleared
+
+
+def _is_already_sold_error(msg: str) -> bool:
+    text = (msg or "").lower()
+    keys = ("잔고", "수량", "매도가능", "보유", "부족", "주문가능수량이")
+    return any(k in text for k in keys)
+
+
 def run_morning_sell_closing_bet() -> None:
     """09:00 - 종가베팅 포지션 시초가 매도 (K1 종가 제외)"""
     if not is_trading_day():
         return
+
+    reconcile_positions_with_account()
 
     if _k1_closing_positions:
         notifier.send(
@@ -1213,7 +1312,11 @@ def _execute_closing_sell(code: str, pos: dict, reason: str) -> None:
             notifier.notify_sell(name, code, quantity, profit_pct, sell_reason)
         else:
             msg = result.get("msg1", "알 수 없는 오류")
-            notifier.notify_error(f"{name} 종가베팅 매도 실패: {msg}")
+            if _is_already_sold_error(msg):
+                _record_manual_sell(code, pos, "종가베팅", _closing_positions)
+                _save_state()
+            else:
+                notifier.notify_error(f"{name} 종가베팅 매도 실패: {msg}")
 
     except Exception as e:
         notifier.notify_error(f"{name} 종가베팅 매도 오류: {e}")
@@ -1702,6 +1805,7 @@ def _check_k1_closing_entry() -> None:
 
 def _check_k1_closing_exit() -> None:
     """K1 포지션 4일차 강제 청산"""
+    reconcile_positions_with_account()
     if not _k1_closing_positions:
         return
 
@@ -1728,7 +1832,15 @@ def _check_k1_closing_exit() -> None:
                 notifier.notify_sell(name, code, quantity, profit_pct, reason)
                 print(f"[K1종가] 매도 {name}({code}) {reason}")
             else:
-                notifier.notify_error(f"{name} K1 청산 실패: {result.get('msg1', '')}")
+                msg = result.get("msg1", "")
+                if _is_already_sold_error(msg):
+                    _record_manual_sell(
+                        code, pos, pos.get("strategy", k1_closing.STRATEGY),
+                        _k1_closing_positions,
+                    )
+                    _save_state()
+                else:
+                    notifier.notify_error(f"{name} K1 청산 실패: {msg}")
         except Exception as e:
             notifier.notify_error(f"{name} K1 청산 오류: {e}")
         time.sleep(0.5)
@@ -2029,6 +2141,9 @@ def main():
     print(f"[계좌 검증] {acc_msg}")
     if orderable_cash is not None:
         print(f"[예수금] 주문가능금액 {orderable_cash:,}원")
+
+    # 수동매도된 종목을 봇 상태에서 즉시 정리
+    reconcile_positions_with_account(notify_empty=True)
 
     # HTTP API 서버를 별도 스레드로 시작 (텔레그램 봇 연동)
     import api_server, threading
