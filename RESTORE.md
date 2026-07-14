@@ -1,69 +1,89 @@
 # 복구 가이드 (Kis-auto-trading)
 
-Railway·로컬 어디서든 **GitHub stable 태그 기준으로 동일 상태를 복원**할 수 있습니다.
+초기화·오배포 후 **코드 + Variables**를 이 가이드로 되돌립니다.
 
-## 1. 코드 복원 (최신 백업)
+## 백업 구성 (2026-07-14 / v4.0-stable)
+
+| 종류 | 위치 | 내용 |
+|------|------|------|
+| 코드 | Git 태그 `v4.0-stable` | K2+ 시뮬·우선순위 A 포함 (`b553ed9`) |
+| 공개 설정 | [`railway-public-snapshot.env`](./railway-public-snapshot.env) | 시크릿 없는 Variables 스냅샷 (커밋됨) |
+| 시크릿 | `backups/railway-env-LATEST.env` | 로컬 전용 (gitignore). KIS/텔레그램/Groq 등 |
+| 체크리스트 | [`RAILWAY_VARIABLES.md`](./RAILWAY_VARIABLES.md) | 변수 설명 |
+
+> Railway Dashboard에 “설정 파일 업로드” 기능은 없습니다.  
+> **Variables Raw Editor에 붙여 넣는 방식**이 복구입니다.
+
+---
+
+## 1. 코드 복원
 
 ```bash
-git clone https://github.com/hsjjang3535-jpg/Kis-auto-trading.git
-cd Kis-auto-trading
 git fetch --tags
-git checkout v3.0-stable
+git checkout v4.0-stable
+# Railway가 main을 배포한다면:
+git checkout main
+git reset --hard v4.0-stable
+git push origin main --force-with-lease   # 복원할 때만
 ```
 
-## 2. 환경변수 설정
+또는 GitHub에서 태그 `v4.0-stable` → 해당 커밋으로 Redeploy.
+
+---
+
+## 2. Variables 복원 (권장 순서)
+
+### A) 시크릿 포함 전체 복구 (로컬 PC에 백업 있는 경우)
+
+1. `kis-trading-bot/backups/railway-env-LATEST.env` 연다  
+2. Railway → **Kis-auto-trading** → Variables → **Raw Editor**  
+3. 내용 전체 붙여넣기 → Save → **Redeploy**
+
+### B) 시크릿 백업이 없을 때
+
+1. `railway-public-snapshot.env` 내용을 Raw Editor에 붙인다  
+2. 아래 시크릿만 Dashboard에서 다시 입력한다  
+   - `KIS_APP_KEY`, `KIS_APP_SECRET`, `KIS_ACCOUNT_NO`  
+   - `GROQ_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`  
+   - `API_SECRET` (telegram-gemini-bot trading과 **동일**)  
+   - (선택) `NAVER_CLIENT_ID`, `NAVER_CLIENT_SECRET`  
+3. `KIS_MODE` / 계좌·앱키가 **모의↔실전 짝**인지 확인  
+4. Redeploy
+
+---
+
+## 3. 운영 시 켜 두는 플래그 (참고)
+
+스냅샷 기본값은 안전을 위해 전략 OFF(`false`)입니다.  
+실제 운영 중인 ON/OFF는 **시크릿 백업 파일** 또는 Railway 현재 값이 정본입니다.
+
+우선순위: **K1 실전 > K1+ 시뮬 > K2+ 시뮬 > K2 시뮬 > UL 시뮬**
+
+---
+
+## 4. 로컬 실행 복구
 
 ```bash
-cp .env.example .env
-# .env 파일을 편집해 실제 키 입력
-```
+# 시크릿 백업이 있으면
+copy backups\railway-env-LATEST.env .env
 
-Railway: **Dashboard → Variables**에 `.env.example` 항목 설정.  
-**체크리스트:** [RAILWAY_VARIABLES.md](./RAILWAY_VARIABLES.md)
-
-### Railway 권장 Variables (자동매매)
-
-| 변수 | 권장값 | 비고 |
-|------|--------|------|
-| `KIS_MODE` | `모의` | 모의투자 |
-| `ENABLE_CRASH_BOUNCE` | `true` | 낙폭반등 ON |
-| `TZ` | `Asia/Seoul` | KST 스케줄 |
-
-`MIN_CHANGE_RATE`, `VOL_RATIO_MIN`, `W52_GAP_UPPER_MAX`, `CLOSING_BET_MIN_RATE`, `LOWER_RSI_MAX`, `CRASH_BOUNCE_*` 는 **Variables에 넣지 않아도** `.env.example` 기본값 적용.
-
-## 3. 로컬 실행
-
-```bash
 pip install -r requirements.txt
 python trader.py
 ```
 
-## 4. Railway 재배포
+---
 
-- GitHub `main` push → 자동 배포
-- 또는 Dashboard → **Redeploy**
-
-## 5. stable 태그 (백업)
+## 5. stable 태그 이력
 
 | 태그 | 설명 |
 |------|------|
-| **`v3.0-stable`** | **현재 최신** — 낙폭반등, 1·2순위 스크리너 완화, KIS API 재시도 |
+| **`v4.0-stable`** | **현재** — K1+/K2+/K2 시뮬, 우선순위 A, 손익 실전/시뮬 분리 |
+| `v3.0-stable` | 이전 — 낙폭반등·스크리너 완화 등 |
 
-> 이전 태그(`v1.0-stable`, `v2.0-stable`, `v2.1-stable`)는 삭제됨. 복원은 `v3.0-stable` 사용.
+---
 
-## 6. v3.0-stable 포함 기능
+## 6. 주의
 
-- 장중매매: 상단 / 돌파 / 하단 (종산법, 1·2순위 완화)
-- 종가베팅: 14:00 스크리닝 → 익일 09:00 시초가 매도
-- 낙폭반등: 09:10~10:30, 한도 50만, 익절 +3%
-- 손절 -2% / 장중 트레일링 익절 +3%
-
-## 7. 문제 발생 시
-
-```bash
-git fetch --tags
-git checkout v3.0-stable
-git push origin HEAD:main --force-with-lease   # Railway를 이 버전으로 되돌릴 때만
-```
-
-`--force-with-lease`는 main을 태그 시점으로 되돌릴 때만 사용하세요.
+- `backups/*.env`는 **커밋·공유 금지** (시크릿)  
+- main force-push는 복원 목적일 때만  
+- 실전 전환 시 키 4종(`KIS_MODE`, APP_KEY, APP_SECRET, ACCOUNT_NO)만 바꾸면 됨 — 공개 스냅샷 참고

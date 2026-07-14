@@ -5,7 +5,9 @@
 > 복사본은 **비밀번호 관리자**(1Password, Bitwarden 등)에 보관하세요.
 
 **서비스:** `Kis-auto-trading` (production)  
-**백업 태그:** `v3.0-stable`  
+**백업 태그:** `v4.0-stable` (2026-07-14, commit `b553ed9`)  
+**공개 스냅샷:** [railway-public-snapshot.env](./railway-public-snapshot.env)  
+**시크릿 로컬 백업:** `backups/railway-env-LATEST.env` (gitignore)  
 **복구 가이드:** [RESTORE.md](./RESTORE.md)
 
 ---

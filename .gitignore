@@ -3,3 +3,8 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+
+# Local secret backups and PDF OCR scratch (do not commit)
+backups/
+.pdf_ocr_preview/
+.pdf_venv/
