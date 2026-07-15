@@ -652,6 +652,90 @@ def _account_holding_qty() -> dict[str, int] | None:
     return qty_map
 
 
+def recover_configured_closing_positions() -> list[str]:
+    """
+    Railway 재배포로 trading_state.json이 사라졌을 때 지정한 종가베팅만 복원.
+
+    형식:
+      CLOSING_RECOVERY_POSITIONS=종목코드|종목명|매수일|복구만료일
+      여러 종목은 쉼표로 구분.
+
+    계좌에 실제 잔고가 있을 때만 일반 종가베팅 포지션으로 등록한다.
+    K1/장중 포지션으로 이미 추적 중인 종목은 건드리지 않는다.
+    """
+    raw = os.getenv("CLOSING_RECOVERY_POSITIONS", "").strip()
+    if not raw:
+        return []
+
+    today = datetime.now(KST).date()
+    configured: dict[str, tuple[str, str]] = {}
+    for item in raw.split(","):
+        parts = [part.strip() for part in item.split("|")]
+        if len(parts) != 4:
+            print(f"[종가복구] 잘못된 설정 스킵: {item}")
+            continue
+        code, name, buy_date, expires = parts
+        try:
+            expires_date = datetime.strptime(expires, "%Y-%m-%d").date()
+            datetime.strptime(buy_date, "%Y-%m-%d")
+        except ValueError:
+            print(f"[종가복구] 날짜 형식 오류 스킵: {item}")
+            continue
+        if code and today <= expires_date:
+            configured[code] = (name or code, buy_date)
+
+    pending = {
+        code: meta for code, meta in configured.items()
+        if code not in _closing_positions
+        and code not in _k1_closing_positions
+        and code not in _positions
+    }
+    if not pending:
+        return []
+
+    try:
+        rows = kis_api.get_holdings()
+    except Exception as e:
+        print(f"[종가복구] 계좌 보유조회 실패: {e}")
+        return []
+
+    recovered: list[str] = []
+    for row in rows or []:
+        code = str(row.get("pdno") or row.get("mksc_shrn_iscd") or "").strip()
+        if code not in pending:
+            continue
+        try:
+            quantity = int(float(row.get("hldg_qty") or 0))
+            buy_price = int(float(row.get("pchs_avg_pric") or 0))
+        except (TypeError, ValueError):
+            continue
+        if quantity <= 0 or buy_price <= 0:
+            continue
+
+        configured_name, buy_date = pending[code]
+        name = str(row.get("prdt_name") or configured_name).strip()
+        _closing_positions[code] = {
+            "name": name,
+            "quantity": quantity,
+            "buy_price": buy_price,
+            "strategy": "종가베팅",
+            "buy_reason": "Railway 상태 유실 대비 지정 복구",
+            "buy_date": buy_date,
+        }
+        recovered.append(code)
+        notifier.send(
+            f"♻️ 종가베팅 포지션 복구\n"
+            f"종목: {name} ({code})\n"
+            f"수량: {quantity}주 / 평균단가: {buy_price:,}원\n"
+            f"매수일: {buy_date} / 다음 09:00 매도 대상"
+        )
+        print(f"[종가복구] {name}({code}) {quantity}주 @ {buy_price:,}")
+
+    if recovered:
+        _save_state()
+    return recovered
+
+
 def _record_manual_sell(code: str, pos: dict, strategy: str, store: dict) -> None:
     """계좌에 없으면 봇 포지션을 수동매도로 정리"""
     name = pos.get("name", code)
@@ -732,6 +816,7 @@ def run_morning_sell_closing_bet() -> None:
     if not is_trading_day():
         return
 
+    recover_configured_closing_positions()
     reconcile_positions_with_account()
 
     if _k1_closing_positions:
@@ -2391,7 +2476,8 @@ def main():
     if orderable_cash is not None:
         print(f"[예수금] 주문가능금액 {orderable_cash:,}원")
 
-    # 수동매도된 종목을 봇 상태에서 즉시 정리
+    # 재배포로 상태가 사라진 지정 종가베팅 복원 후 수동매도 상태 동기화
+    recover_configured_closing_positions()
     reconcile_positions_with_account(notify_empty=True)
 
     # HTTP API 서버를 별도 스레드로 시작 (텔레그램 봇 연동)
