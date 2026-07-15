@@ -104,6 +104,8 @@ CLOSING_RECOVERY_POSITIONS=042700|한미반도체|2026-07-15|2026-07-16
 | `CRASH_BOUNCE_ENTRY_START` | `09:10` | 진입 시작 |
 | `CRASH_BOUNCE_ENTRY_END` | `10:30` | 진입 종료 |
 | `CRASH_BOUNCE_TIME_EXIT` | `11:00` | 시간 청산 |
+| `CRASH_BOUNCE_AFTERNOON_TIME_EXIT` | `14:20` | 13:15 재검색 체결분 시간 청산 |
+| `CRASH_BOUNCE_AFTERNOON_VOLUME_RATIO` | `1.2` | 오후 최근 5분봉 거래량 증가 배수 |
 | `CRASH_BOUNCE_MIN_DROP` | `3.5` | 시가 대비 -3.5%↑ |
 | `MAX_CRASH_BOUNCE_AMOUNT` | `500000` | 총 한도 |
 | `MAX_CRASH_BOUNCE_BUY` | `500000` | 1회 매수 |
@@ -111,6 +113,19 @@ CLOSING_RECOVERY_POSITIONS=042700|한미반도체|2026-07-15|2026-07-16
 | `CRASH_BOUNCE_TAKE_PROFIT` | `3.0` | 익절 +3% |
 | `CRASH_BOUNCE_STOP_LOSS` | `2.0` | 손절 -2% |
 | `CRASH_BOUNCE_MAX_API_CALLS` | `20` | 스캔당 API 상한 |
+
+오전 미체결 시에만 13:15에 최근 30분 새 저점 반등·거래량 증가 조건으로
+한 번 더 검색합니다. 매수 한도는 오전과 동일합니다.
+
+### V자반등 오후 재검색
+
+`ENABLE_V_REVERSAL=true`이고 오전 미체결이면 동일하게 13:15에 한 번 재검색합니다.
+
+| Variable | 기본값 | 설명 |
+|----------|--------|------|
+| `V_REVERSAL_AFTERNOON_VOLUME_RATIO` | `1.2` | 오후 최근 5분봉 거래량 증가 배수 |
+| `V_REVERSAL_TIME_EXIT` | `14:20` | 오전·오후 체결분 시간 청산 |
+| `MAX_V_REVERSAL_AMOUNT` | `500000` | 오전·오후 공통 총 한도 |
 
 ---
 

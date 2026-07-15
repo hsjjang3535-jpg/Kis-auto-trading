@@ -2,7 +2,8 @@
 낙폭반등 단타 (급락 후 5분봉 반등 매매)
 
 - ENABLE_CRASH_BOUNCE=false (기본) → 코드만 있고 동작 없음
-- 09:10~10:30 진입 / 5분봉 MA 저항·손익·시간 청산
+- 09:10~10:30 진입 + 오전 미체결 시 13:15 오후 필터 재검색
+- 5분봉 MA 저항·손익·시간 청산
 - AI 미사용, 전용 자금·API 호출 상한
 """
 from __future__ import annotations
@@ -43,6 +44,9 @@ ENABLED = _env_bool("ENABLE_CRASH_BOUNCE", False)
 ENTRY_START_MIN = _parse_hhmm(os.getenv("CRASH_BOUNCE_ENTRY_START", "09:10"), 9, 10)
 ENTRY_END_MIN = _parse_hhmm(os.getenv("CRASH_BOUNCE_ENTRY_END", "10:30"), 10, 30)
 TIME_EXIT_MIN = _parse_hhmm(os.getenv("CRASH_BOUNCE_TIME_EXIT", "11:00"), 11, 0)
+AFTERNOON_TIME_EXIT_MIN = _parse_hhmm(
+    os.getenv("CRASH_BOUNCE_AFTERNOON_TIME_EXIT", "14:20"), 14, 20,
+)
 MIN_DROP_PCT = float(os.getenv("CRASH_BOUNCE_MIN_DROP", "3.5"))
 MAX_AMOUNT = int(os.getenv("MAX_CRASH_BOUNCE_AMOUNT", "500000"))
 MAX_BUY = int(os.getenv("MAX_CRASH_BOUNCE_BUY", "500000"))
@@ -53,6 +57,7 @@ STOP_LOSS_PCT = float(os.getenv("CRASH_BOUNCE_STOP_LOSS", "2.0"))
 MA_TOLERANCE_PCT = float(os.getenv("CRASH_BOUNCE_MA_TOLERANCE", "0.5"))
 SCAN_TOP_N = int(os.getenv("CRASH_BOUNCE_SCAN_TOP", "20"))
 MAX_CHART_CHECKS = int(os.getenv("CRASH_BOUNCE_MAX_CHART_CHECKS", "5"))
+AFTERNOON_VOLUME_RATIO = float(os.getenv("CRASH_BOUNCE_AFTERNOON_VOLUME_RATIO", "1.2"))
 
 
 def is_enabled() -> bool:
@@ -100,7 +105,35 @@ def _has_bounce_pattern(bars: list[dict]) -> bool:
     return recent[-1]["close"] >= session_low * 1.003
 
 
-def scan_candidates(api_budget: int | None = None) -> tuple[list[dict], int]:
+def _has_afternoon_bounce(bars: list[dict]) -> tuple[bool, float]:
+    """최근 30분 안에 새 저점·반등·거래량 증가가 함께 나온 경우만 허용."""
+    if len(bars) < 7:
+        return False, 0.0
+
+    # 마지막 봉은 진행 중일 수 있어 제외하고 최근 완료된 6개 봉을 사용한다.
+    recent = bars[-7:-1]
+    lows = [bar["low"] for bar in recent]
+    low_index = lows.index(min(lows))
+    # 저점이 최근 20분 안에 형성되고, 뒤에 최소 한 개의 반등 봉이 있어야 한다.
+    if low_index < 2 or low_index >= len(recent) - 1:
+        return False, 0.0
+
+    signal = recent[-1]
+    previous = recent[-2]
+    recent_low = lows[low_index]
+    if signal["close"] <= previous["close"] or signal["close"] < recent_low * 1.003:
+        return False, 0.0
+
+    prior_volumes = [bar.get("volume", 0) for bar in recent[:-1]]
+    avg_volume = sum(prior_volumes) / len(prior_volumes) if prior_volumes else 0
+    volume_ratio = signal.get("volume", 0) / avg_volume if avg_volume > 0 else 0
+    return volume_ratio >= AFTERNOON_VOLUME_RATIO, volume_ratio
+
+
+def scan_candidates(
+    api_budget: int | None = None,
+    afternoon: bool = False,
+) -> tuple[list[dict], int]:
     """
     거래대금 상위 중 시가 대비 급락 종목 스캔.
     Returns: (후보 리스트, 사용한 API 호출 수)
@@ -187,7 +220,12 @@ def scan_candidates(api_budget: int | None = None) -> tuple[list[dict], int]:
             continue
 
         bars = intra.get("bars_5", [])
-        if not _has_bounce_pattern(bars):
+        afternoon_volume_ratio = 0.0
+        if afternoon:
+            has_bounce, afternoon_volume_ratio = _has_afternoon_bounce(bars)
+            if not has_bounce:
+                continue
+        elif not _has_bounce_pattern(bars):
             continue
 
         candidates.append({
@@ -200,7 +238,12 @@ def scan_candidates(api_budget: int | None = None) -> tuple[list[dict], int]:
             "ma_period": intra.get("ma_period", 0),
             "rsi": intra.get("rsi", 50),
             "strategy": STRATEGY,
-            "reason": f"시가 대비 -{drop:.1f}% 급락 후 5분봉 반등",
+            "reason": (
+                f"[오후필터] 시가 대비 -{drop:.1f}% · 최근 30분 새 저점 반등 · "
+                f"거래량 {afternoon_volume_ratio:.1f}배"
+                if afternoon
+                else f"시가 대비 -{drop:.1f}% 급락 후 5분봉 반등"
+            ),
         })
 
         if used >= budget:
@@ -230,7 +273,15 @@ def evaluate_exit(
         if profit_pct > 0:
             return True, f"5분봉 MA{pos.get('ma_period', 60)} 저항 익절 (+{profit_pct:.1f}%)"
 
-    if now_min >= TIME_EXIT_MIN and profit_pct > 0:
-        return True, f"낙폭반등 시간 청산 (+{profit_pct:.1f}%, {TIME_EXIT_MIN // 60:02d}:{TIME_EXIT_MIN % 60:02d})"
+    time_exit_min = (
+        AFTERNOON_TIME_EXIT_MIN
+        if pos.get("entry_session") == "afternoon"
+        else TIME_EXIT_MIN
+    )
+    if now_min >= time_exit_min and profit_pct > 0:
+        return True, (
+            f"낙폭반등 시간 청산 (+{profit_pct:.1f}%, "
+            f"{time_exit_min // 60:02d}:{time_exit_min % 60:02d})"
+        )
 
     return False, ""

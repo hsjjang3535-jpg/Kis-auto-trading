@@ -3,6 +3,7 @@ V자반등 단타 (강세주 시초 조정 후 5분봉 반등)
 
 - ENABLE_V_REVERSAL=false (기본) → 코드만 있고 동작 없음
 - 전일比 상승 + 5일선 위 + 시가 대비 조정 + V반등 → 09:15~10:30 진입
+- 오전 미체결 시 13:15에 최근 저점·거래량을 확인하는 오후 필터 재검색
 - 트레일링 익절 / 5분봉 MA 저항 / 14:20 시간청산
 """
 from __future__ import annotations
@@ -62,6 +63,7 @@ STOP_LOSS_PCT = float(os.getenv("V_REVERSAL_STOP_LOSS", "2.0"))
 MA_TOLERANCE_PCT = float(os.getenv("V_REVERSAL_MA_TOLERANCE", "0.5"))
 SCAN_TOP_N = int(os.getenv("V_REVERSAL_SCAN_TOP", "30"))
 MAX_CHART_CHECKS = int(os.getenv("V_REVERSAL_MAX_CHART_CHECKS", "5"))
+AFTERNOON_VOLUME_RATIO = float(os.getenv("V_REVERSAL_AFTERNOON_VOLUME_RATIO", "1.2"))
 
 
 def is_enabled() -> bool:
@@ -130,7 +132,34 @@ def _has_v_bounce(bars: list[dict]) -> bool:
     )
 
 
-def scan_candidates(api_budget: int | None = None) -> tuple[list[dict], int]:
+def _has_afternoon_v_bounce(bars: list[dict]) -> tuple[bool, float]:
+    """최근 30분 안의 새 저점 이후 상승 전환과 거래량 증가를 확인."""
+    if len(bars) < 7:
+        return False, 0.0
+
+    # 마지막 봉은 진행 중일 수 있으므로 최근 완료된 6개 봉만 사용한다.
+    recent = bars[-7:-1]
+    lows = [bar["low"] for bar in recent]
+    low_index = lows.index(min(lows))
+    if low_index < 2 or low_index >= len(recent) - 1:
+        return False, 0.0
+
+    signal = recent[-1]
+    previous = recent[-2]
+    recent_low = lows[low_index]
+    if signal["close"] <= previous["close"] or signal["close"] < recent_low * 1.003:
+        return False, 0.0
+
+    prior_volumes = [bar.get("volume", 0) for bar in recent[:-1]]
+    avg_volume = sum(prior_volumes) / len(prior_volumes) if prior_volumes else 0
+    volume_ratio = signal.get("volume", 0) / avg_volume if avg_volume > 0 else 0
+    return volume_ratio >= AFTERNOON_VOLUME_RATIO, volume_ratio
+
+
+def scan_candidates(
+    api_budget: int | None = None,
+    afternoon: bool = False,
+) -> tuple[list[dict], int]:
     """거래대금 상위 중 강세주 시초 조정 + V반등 스캔."""
     budget = api_budget if api_budget is not None else MAX_API_CALLS
     used = 0
@@ -223,7 +252,12 @@ def scan_candidates(api_budget: int | None = None) -> tuple[list[dict], int]:
             continue
 
         bars = intra.get("bars_5", [])
-        if not _has_v_bounce(bars):
+        afternoon_volume_ratio = 0.0
+        if afternoon:
+            has_bounce, afternoon_volume_ratio = _has_afternoon_v_bounce(bars)
+            if not has_bounce:
+                continue
+        elif not _has_v_bounce(bars):
             continue
 
         candidates.append({
@@ -238,7 +272,15 @@ def scan_candidates(api_budget: int | None = None) -> tuple[list[dict], int]:
             "rsi": intra.get("rsi", 50),
             "strategy": STRATEGY,
             "reason": (
-                f"전일比+{item['prdy_ctrt']:.1f}% · 시가 대비 -{drop:.1f}% 조정 후 V반등"
+                (
+                    f"[오후필터] 전일比+{item['prdy_ctrt']:.1f}% · "
+                    f"최근 30분 새 저점 V반등 · 거래량 {afternoon_volume_ratio:.1f}배"
+                )
+                if afternoon
+                else (
+                    f"전일比+{item['prdy_ctrt']:.1f}% · "
+                    f"시가 대비 -{drop:.1f}% 조정 후 V반등"
+                )
             ),
         })
 
