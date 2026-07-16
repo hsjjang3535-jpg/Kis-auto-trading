@@ -241,6 +241,11 @@ _crash_bounce_invested_today: int = 0
 # 오늘 V자반등 투자금 (전용 한도)
 _v_reversal_invested_today: int = 0
 
+# 장중 금액 부족 알림 (종목당 1회)
+_intraday_low_cash_notified: set[str] = set()
+# 당일 매도한 장중 종목 — 재진입 금지
+_sold_codes_today: set[str] = set()
+
 # 종가베팅 워치리스트 (14:00 스크리닝)
 _closing_watchlist: list[dict] = []
 
@@ -276,6 +281,34 @@ def _today_kst() -> str:
     return datetime.now(KST).strftime("%Y-%m-%d")
 
 
+def _position_buy_cost(pos: dict) -> int:
+    try:
+        return max(int(pos.get("buy_price") or 0) * int(pos.get("quantity") or 0), 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _release_intraday_budget(pos: dict) -> None:
+    """장중 매도 시 전략별 당일 투자 한도 복구."""
+    global _total_invested_today, _crash_bounce_invested_today, _v_reversal_invested_today
+    cost = _position_buy_cost(pos)
+    if cost <= 0:
+        return
+    strategy = pos.get("strategy", "")
+    if strategy == crash_bounce.STRATEGY:
+        _crash_bounce_invested_today = max(0, _crash_bounce_invested_today - cost)
+    elif strategy == v_reversal.STRATEGY:
+        _v_reversal_invested_today = max(0, _v_reversal_invested_today - cost)
+    else:
+        _total_invested_today = max(0, _total_invested_today - cost)
+
+
+def _mark_sold_today(code: str) -> None:
+    """당일 매도 종목 재진입 금지 등록."""
+    if code:
+        _sold_codes_today.add(code)
+
+
 def _save_state() -> None:
     state = {
         "kis_mode": os.getenv("KIS_MODE", "모의"),
@@ -285,6 +318,8 @@ def _save_state() -> None:
         "crash_bounce_invested_today": _crash_bounce_invested_today,
         "v_reversal_invested_today": _v_reversal_invested_today,
         "trades_today": _trades_today,
+        "sold_codes_today": sorted(_sold_codes_today),
+        "intraday_low_cash_notified": sorted(_intraday_low_cash_notified),
         "closing_positions": _closing_positions,       # 오버나이트 유지
         "closing_invested_today": _closing_invested_today,
         "ul_rebound_watchlist": ul_rebound.dump_watchlist(),
@@ -311,7 +346,7 @@ def _load_state() -> None:
     global _positions, _total_invested_today, _trades_today
     global _closing_positions, _closing_invested_today, _crash_bounce_invested_today
     global _v_reversal_invested_today, _k1_closing_positions
-    global _daily_pnl_ledger
+    global _daily_pnl_ledger, _sold_codes_today, _intraday_low_cash_notified
     if not os.path.exists(_STATE_FILE):
         return
     try:
@@ -403,8 +438,26 @@ def _load_state() -> None:
             _v_reversal_invested_today = state.get("v_reversal_invested_today", 0)
             _trades_today = state.get("trades_today", [])
             _closing_invested_today = state.get("closing_invested_today", 0)
+            sold_raw = state.get("sold_codes_today", [])
+            if isinstance(sold_raw, list) and sold_raw:
+                _sold_codes_today = {str(c) for c in sold_raw if c}
+            else:
+                # 구버전 상태: 오늘 장중 매도 기록에서 재진입 금지 목록 복원
+                _sold_codes_today = {
+                    str(t.get("code"))
+                    for t in _trades_today
+                    if t.get("code") and t.get("strategy") not in ("종가베팅", k1_closing.STRATEGY)
+                }
+            low_cash_raw = state.get("intraday_low_cash_notified", [])
+            _intraday_low_cash_notified = (
+                {str(c) for c in low_cash_raw if c}
+                if isinstance(low_cash_raw, list)
+                else set()
+            )
             if _positions:
                 print(f"[상태 복원] 장중 포지션 {len(_positions)}개 불러옴")
+            if _sold_codes_today:
+                print(f"[상태 복원] 당일 매도 재진입금지 {len(_sold_codes_today)}종목")
             if _trades_today:
                 print(f"[상태 복원] 오늘 체결 {len(_trades_today)}건 불러옴")
     except Exception as e:
@@ -768,6 +821,9 @@ def _record_manual_sell(code: str, pos: dict, strategy: str, store: dict) -> Non
         "sell_reason": reason,
         "strategy": strategy,
     })
+    if store is _positions:
+        _release_intraday_budget(pos)
+        _mark_sold_today(code)
     store.pop(code, None)
     notifier.notify_sell(name, code, quantity, profit_pct, reason)
     print(f"[포지션동기화] {name}({code}) {reason}")
@@ -1152,7 +1208,13 @@ def run_status_report() -> None:
         waiting_lines = []
         for s in _watchlist:
             code = s["code"]
-            if code not in _positions:
+            if code in _positions:
+                continue
+            if code in _sold_codes_today:
+                waiting_lines.append(
+                    f"  🚫{s['name']}({s.get('strategy','')}): 당일 매도 — 재진입 금지"
+                )
+            else:
                 skip = s.get("_skip_reason", "조건 대기 중")
                 waiting_lines.append(
                     f"  ⏳{s['name']}({s.get('strategy','')}): {skip}"
@@ -1657,6 +1719,8 @@ def _check_crash_bounce_entry(afternoon: bool = False) -> None:
 
         if code in already_held:
             continue
+        if code in _sold_codes_today:
+            continue
 
         try:
             current = kis_api.get_current_price(code, fallback=stock.get("current"))
@@ -1741,6 +1805,8 @@ def _check_v_reversal_entry(afternoon: bool = False) -> None:
         name = stock["name"]
 
         if code in already_held:
+            continue
+        if code in _sold_codes_today:
             continue
 
         try:
@@ -2271,7 +2337,7 @@ def _check_entry() -> None:
     # 매수 직전에도 우선순위 재정렬 (점수 높은 종목부터)
     pending = _sort_intraday_watchlist([
         s for s in _watchlist
-        if s["code"] not in already_held
+        if s["code"] not in already_held and s["code"] not in _sold_codes_today
     ])
 
     for stock in pending:
@@ -2337,10 +2403,13 @@ def _check_entry() -> None:
                     f"[장중] {name} 금액 부족 "
                     f"(현재가 {int(current):,}원 / 잔여 {remaining:,}원) → 다음 후보"
                 )
-                notifier.send(
-                    f"⚠️ {name}: 금액 부족 (현재가 {int(current):,}원) "
-                    f"→ 다음 우선순위 종목으로 진행"
-                )
+                if code not in _intraday_low_cash_notified:
+                    _intraday_low_cash_notified.add(code)
+                    _save_state()
+                    notifier.send(
+                        f"⚠️ {name}: 금액 부족 (현재가 {int(current):,}원) "
+                        f"→ 다음 우선순위 종목으로 진행"
+                    )
                 continue
 
             result = kis_api.buy_stock(code, quantity)
@@ -2497,6 +2566,8 @@ def _execute_sell(code: str, pos: dict, reason: str,
                 "buy_reason": pos.get("buy_reason", ""),
                 "strategy": pos.get("strategy", ""),
             })
+            _release_intraday_budget(pos)
+            _mark_sold_today(code)
             del _positions[code]
             _save_state()
             notifier.notify_sell(name, code, quantity, profit_pct, sell_reason)
@@ -2519,6 +2590,7 @@ def _reset_daily_state() -> None:
     global _v_reversal_invested_today
     global _closing_low_cash_notified, _closing_low_cash_skipped
     global _closing_depleted_notified, _closing_balance_fail_notified
+    global _sold_codes_today, _intraday_low_cash_notified
     _watchlist = []
     _closing_watchlist = []
     _trades_today = []
@@ -2530,6 +2602,8 @@ def _reset_daily_state() -> None:
     _closing_low_cash_skipped = set()
     _closing_depleted_notified = False
     _closing_balance_fail_notified = False
+    _sold_codes_today = set()
+    _intraday_low_cash_notified = set()
     # _closing_positions는 초기화 안 함 - 오버나이트 포지션 유지
     ul_rebound.reset_daily_sim_trades()
     k1_closing.reset_daily_sim_trades()
