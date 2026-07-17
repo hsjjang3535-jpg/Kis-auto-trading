@@ -86,6 +86,9 @@ CLOSING_RECOVERY_POSITIONS=042700|한미반도체|2026-07-15|2026-07-16
 | `MIN_CHANGE_RATE` | `-2.0` | -2%까지 허용 (그 아래 제외) |
 | `VOL_RATIO_MIN` | `1.2` | 거래량 1.2배 |
 | `W52_GAP_UPPER_MAX` | `10.0` | 상단매매 52주 신고가 % |
+| `UPPER_MA5_GAP_MAX` | `20.0` | 상단매매 MA5 이격 상한% (이후 12~15로 조정 가능) |
+| `ENTRY_5MIN_CONFIRM` | `true` | 장중 매수 직전 5분봉(양봉·거래량) 확인 |
+| `ENTRY_5MIN_VOLUME_RATIO` | `1.0` | 5분봉 거래량 ≥ 직전 평균 배수 |
 | `W52_GAP_LOWER_MAX` | `25.0` | 하단매매 52주 고가 % |
 | `UPPER_TAIL_MAX` | `0.35` | 윗꼬리 비율 상한 |
 | `CLOSING_BET_MIN_RATE` | `1.5` | 종가베팅 당일 +1.5%↑ |

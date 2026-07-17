@@ -2353,6 +2353,46 @@ def _check_k1_closing_exit() -> None:
 
 # ── 장중매매 진입 로직 ─────────────────────────────────────────────────────────
 
+def _confirm_5min_entry(code: str) -> tuple[bool, str]:
+    """매수 직전 5분봉 확인: 최근 완료 봉이 양봉·상승·거래량 동반인지 검사.
+
+    워치리스트 전체가 아니라 일·기술적 조건을 통과한 소수 종목에만 호출한다.
+    """
+    if not screener.ENTRY_5MIN_CONFIRM:
+        return True, ""
+
+    try:
+        # 최근 40분이면 5분봉 확인에 충분 — API 호출 수 절약
+        minutes = kis_api.get_intraday_minute_bars(code, max_minutes=40)
+        bars = kis_api.aggregate_5min_bars(minutes)
+        time.sleep(0.3)
+    except Exception as e:
+        return False, f"5분봉 조회 실패 ({e})"
+
+    if len(bars) < 3:
+        return False, "5분봉 부족"
+
+    # 마지막 봉은 진행 중일 수 있어 직전 완료 봉을 신호로 사용
+    signal = bars[-2]
+    previous = bars[-3]
+    if signal["close"] <= signal["open"]:
+        return False, "5분봉 음봉"
+    if signal["close"] <= previous["close"]:
+        return False, "5분봉 하락 전환"
+
+    prior = bars[:-2][-4:] if len(bars) >= 6 else bars[:-2]
+    if not prior:
+        return False, "5분봉 거래량 비교 불가"
+    avg_vol = sum(b.get("volume", 0) for b in prior) / len(prior)
+    vol_ratio = (signal.get("volume", 0) / avg_vol) if avg_vol > 0 else 0.0
+    if vol_ratio < screener.ENTRY_5MIN_VOLUME_RATIO:
+        return False, (
+            f"5분봉 거래량 부족 ({vol_ratio:.1f}x "
+            f"< {screener.ENTRY_5MIN_VOLUME_RATIO:g}x)"
+        )
+    return True, f"5분봉 양봉·거래량 {vol_ratio:.1f}x"
+
+
 def _check_entry() -> None:
     """워치리스트 종목 진입 조건 체크 및 매수"""
     if not _watchlist:
@@ -2396,6 +2436,11 @@ def _check_entry() -> None:
             if strategy == "상단매매":
                 if current < ma5:
                     skip_reason = f"MA5 하회 ({current:,.0f} < {ma5:,.0f})"
+                elif ma5 > 0 and (current - ma5) / ma5 * 100 > screener.UPPER_MA5_GAP_MAX:
+                    ma5_gap = (current - ma5) / ma5 * 100
+                    skip_reason = (
+                        f"MA5 과열이격 ({ma5_gap:.1f}% > {screener.UPPER_MA5_GAP_MAX:g}%)"
+                    )
                 elif w52_high <= 0:
                     skip_reason = "52주 신고가 정보 없음"
                 elif (w52_high - current) / w52_high * 100 > screener.W52_GAP_UPPER_MAX:
@@ -2426,6 +2471,12 @@ def _check_entry() -> None:
                 stock["_skip_reason"] = skip_reason
                 continue
 
+            candle_ok, candle_msg = _confirm_5min_entry(code)
+            if not candle_ok:
+                print(f"[진입 미충족] {name}({strategy}): {candle_msg}")
+                stock["_skip_reason"] = candle_msg
+                continue
+
             # 매수 실행
             buy_amount = min(MAX_BUY_AMOUNT, remaining)
             quantity = buy_amount // int(current)
@@ -2447,18 +2498,25 @@ def _check_entry() -> None:
             if result.get("rt_cd") == "0":
                 invested = quantity * int(current)
                 _total_invested_today += invested
+                buy_reason = stock.get("reason", "")
+                if candle_msg:
+                    buy_reason = (
+                        f"{buy_reason} · {candle_msg}".strip(" ·")
+                        if buy_reason
+                        else candle_msg
+                    )
                 _positions[code] = {
                     "name": name,
                     "quantity": quantity,
                     "buy_price": int(current),
                     "peak_price": int(current),  # 트레일링 스탑용 고점 추적
                     "strategy": strategy,
-                    "buy_reason": stock.get("reason", ""),  # AI 매수사유
+                    "buy_reason": buy_reason,
                 }
                 _save_state()
                 already_held.add(code)
                 remaining = MAX_TOTAL_AMOUNT - _total_invested_today
-                notifier.notify_buy(name, code, quantity, int(current), stock.get("reason", ""))
+                notifier.notify_buy(name, code, quantity, int(current), buy_reason)
 
                 if remaining <= 0:
                     break
