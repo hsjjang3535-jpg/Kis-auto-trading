@@ -1888,6 +1888,9 @@ def _check_v_reversal_entry(afternoon: bool = False) -> None:
 
 def run_afternoon_rebound_scan() -> None:
     """13:15 — 오전 미체결 전략만 오후 전용 필터로 한 번 재검색."""
+    if not is_trading_day():
+        return
+
     eligible: list[str] = []
     if (
         crash_bounce.is_enabled()
@@ -2776,25 +2779,38 @@ def main():
         if orderable_cash is not None
         else "💰 주문가능금액: 조회 실패\n"
     )
-    notifier.send(
-        f"🤖 자동매매 봇 시작 (장중매매 + 종가베팅) - {now_kst}\n"
-        f"📍 모드: {os.getenv('KIS_MODE', '모의')}\n"
-        f"{'✅' if acc_ok else '⚠️'} 계좌: {acc_msg}\n"
-        f"{cash_line}"
-        "📌 장중매매: 09:05 스크리닝 → 09:10~14:30 진입 → 14:50 강제청산\n"
-        f"   장중 AI: {'ON (Groq)' if ENABLE_INTRADAY_AI else 'OFF (기술조건만)'}\n"
-        "🌙 종가: 월~목 AI종가(익일매도) / 금 K1종가(4일보유)\n"
-        f"✅ 익절 트레일링 +{TAKE_PROFIT_PCT}% / 손절 -{STOP_LOSS_PCT}% / 15:10 손익보고"
-        f"{crash_note}"
-        f"{v_note}"
-        f"{ul_note}"
-        f"{k1_note}"
-        f"{k2_note}"
-        f"{plus_note}"
-        f"{k2p_note}"
-        f"{closing_pos_note}"
-        f"{k1_pos_note}"
-    )
+    trading_today = is_trading_day()
+    if not trading_today:
+        notifier.send(
+            f"🤖 자동매매 봇 시작 - {now_kst}\n"
+            f"📍 모드: {os.getenv('KIS_MODE', '모의')}\n"
+            f"{'✅' if acc_ok else '⚠️'} 계좌: {acc_msg}\n"
+            f"{cash_line}"
+            "📅 <b>오늘은 휴장일</b> — 매매·스크리닝·재검색 스케줄을 실행하지 않습니다.\n"
+            "다음 거래일에 정상 동작합니다."
+            f"{closing_pos_note}"
+            f"{k1_pos_note}"
+        )
+    else:
+        notifier.send(
+            f"🤖 자동매매 봇 시작 (장중매매 + 종가베팅) - {now_kst}\n"
+            f"📍 모드: {os.getenv('KIS_MODE', '모의')}\n"
+            f"{'✅' if acc_ok else '⚠️'} 계좌: {acc_msg}\n"
+            f"{cash_line}"
+            "📌 장중매매: 09:05 스크리닝 → 09:10~14:30 진입 → 14:50 강제청산\n"
+            f"   장중 AI: {'ON (Groq)' if ENABLE_INTRADAY_AI else 'OFF (기술조건만)'}\n"
+            "🌙 종가: 월~목 AI종가(익일매도) / 금 K1종가(4일보유)\n"
+            f"✅ 익절 트레일링 +{TAKE_PROFIT_PCT}% / 손절 -{STOP_LOSS_PCT}% / 15:10 손익보고"
+            f"{crash_note}"
+            f"{v_note}"
+            f"{ul_note}"
+            f"{k1_note}"
+            f"{k2_note}"
+            f"{plus_note}"
+            f"{k2p_note}"
+            f"{closing_pos_note}"
+            f"{k1_pos_note}"
+        )
 
     print("KST 직접 체크 루프 시작 (schedule 라이브러리 미사용)")
     print(f"현재 KST: {datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')}")
@@ -2838,6 +2854,11 @@ def main():
             last_closing_slot = -1
             last_screening_slot = -1
         _last_ran["date"] = today
+
+        # 휴장일·주말: API 서버만 유지, 매매 스케줄은 전부 스킵
+        if not is_trading_day():
+            time.sleep(30)
+            continue
 
         # ── 09:00~15:20 KST - 전일 종가베팅 매도 (재시작 시 보충 포함) ──────
         if 9 * 60 <= t <= 15 * 60 + 20 and _last_ran.get("closing_sell") != today:
