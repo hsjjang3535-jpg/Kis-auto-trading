@@ -123,6 +123,29 @@ def do_screening():
     return jsonify({"ok": True, "message": "스크리닝 시작됨"})
 
 
+@flask_app.route("/closing-sell", methods=["POST"])
+def do_closing_sell():
+    """종가베팅 익일 매도 수동 실행 (복구 후 즉시 매도용)"""
+    _check_auth()
+    import trader
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    now = datetime.now(ZoneInfo("Asia/Seoul"))
+    t_min = now.hour * 60 + now.minute
+
+    if not trader.is_trading_day():
+        return jsonify({"ok": False, "message": "오늘은 거래일(주말/공휴일)이 아닙니다"})
+    if not (9 * 60 <= t_min <= 15 * 60 + 20):
+        return jsonify({
+            "ok": False,
+            "message": f"장 운영 시간이 아닙니다 (현재 KST {now.strftime('%H:%M')})\n"
+                       "종가베팅 매도는 09:00~15:20 사이에 사용하세요.",
+        })
+    th = threading.Thread(target=trader.run_morning_sell_closing_bet, daemon=True)
+    th.start()
+    return jsonify({"ok": True, "message": "종가베팅 익일 매도 시작됨"})
+
+
 @flask_app.route("/close-all", methods=["POST"])
 def do_close_all():
     """전체 포지션 긴급 청산"""

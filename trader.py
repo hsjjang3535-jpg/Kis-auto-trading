@@ -41,6 +41,10 @@ load_dotenv()
 MAX_BUY_AMOUNT = int(os.getenv("MAX_BUY_AMOUNT", "500000"))
 MAX_TOTAL_AMOUNT = int(os.getenv("MAX_TOTAL_AMOUNT", "1000000"))
 SELL_BLACKLIST = [s.strip() for s in os.getenv("SELL_BLACKLIST", "").split(",") if s.strip()]
+CLOSING_HOLD_EXCLUDE = [
+    s.strip() for s in os.getenv("CLOSING_HOLD_EXCLUDE", "").split(",") if s.strip()
+]
+CLOSING_ACCOUNT_SYNC = os.getenv("CLOSING_ACCOUNT_SYNC", "false").lower() == "true"
 STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "2.0"))
 TAKE_PROFIT_PCT = float(os.getenv("TAKE_PROFIT_PCT", "3.0"))
 TRAILING_STOP_PCT = float(os.getenv("TRAILING_STOP_PCT", "1.0"))
@@ -616,14 +620,148 @@ def run_weekly_pnl_report() -> None:
 
 # ── 유틸 ──────────────────────────────────────────────────────────────────────
 
-def is_trading_day() -> bool:
-    today = datetime.now(KST)
+def is_trading_day(d: datetime | None = None) -> bool:
+    today = d or datetime.now(KST)
     if today.weekday() >= 5:
         return False
     if today.strftime("%Y-%m-%d") in _KR_HOLIDAYS:
         print(f"[공휴일] {today.strftime('%Y-%m-%d')} - 매매 건너뜀")
         return False
     return True
+
+
+def _is_trading_date(day) -> bool:
+    """date 객체 기준 거래일 여부."""
+    return is_trading_day(datetime.combine(day, datetime.min.time(), tzinfo=KST))
+
+
+def _previous_trading_date(day) -> "datetime.date":
+    """day 직전 거래일 (day 미포함)."""
+    from datetime import timedelta
+    cursor = day - timedelta(days=1)
+    while not _is_trading_date(cursor):
+        cursor -= timedelta(days=1)
+    return cursor
+
+
+def _closing_recovery_expires(buy_date: str, grace_days: int = 14) -> str:
+    """Railway 복구 env 만료일 (매수일 + grace)."""
+    from datetime import timedelta
+    try:
+        base = datetime.strptime(buy_date, "%Y-%m-%d").date()
+    except ValueError:
+        base = datetime.now(KST).date()
+    return (base + timedelta(days=grace_days)).strftime("%Y-%m-%d")
+
+
+def _closing_recovery_env_line(code: str, name: str, buy_date: str) -> str:
+    expires = _closing_recovery_expires(buy_date)
+    return f"{code}|{name}|{buy_date}|{expires}"
+
+
+def _is_closing_hold_excluded(code: str, name: str) -> bool:
+    if name in SELL_BLACKLIST or code in SELL_BLACKLIST:
+        return True
+    return name in CLOSING_HOLD_EXCLUDE or code in CLOSING_HOLD_EXCLUDE
+
+
+def _tracked_position_codes() -> set[str]:
+    codes = set(_positions.keys())
+    codes.update(_closing_positions.keys())
+    codes.update(_k1_closing_positions.keys())
+    return codes
+
+
+def _untracked_account_holdings() -> list[dict]:
+    """봇이 추적하지 않는 계좌 보유 종목 (종목코드·종목명·수량·평균단가)."""
+    try:
+        rows = kis_api.get_holdings()
+    except Exception as e:
+        print(f"[종가동기화] 계좌 보유조회 실패: {e}")
+        return []
+
+    tracked = _tracked_position_codes()
+    untracked: list[dict] = []
+    for row in rows or []:
+        code = str(row.get("pdno") or row.get("mksc_shrn_iscd") or "").strip()
+        if not code or code in tracked:
+            continue
+        name = str(row.get("prdt_name") or code).strip()
+        if _is_closing_hold_excluded(code, name):
+            continue
+        try:
+            quantity = int(float(row.get("hldg_qty") or 0))
+            buy_price = int(float(row.get("pchs_avg_pric") or 0))
+        except (TypeError, ValueError):
+            continue
+        if quantity <= 0:
+            continue
+        untracked.append({
+            "code": code,
+            "name": name,
+            "quantity": quantity,
+            "buy_price": buy_price,
+        })
+    return untracked
+
+
+def sync_closing_positions_from_account(notify: bool = True) -> list[str]:
+    """
+    계좌에 있으나 봇 상태에 없는 종목을 종가베팅 포지션으로 복원.
+
+    CLOSING_ACCOUNT_SYNC=true 일 때만 자동 등록.
+    false면 텔레그램으로 복구 env 안내만 보냄.
+    """
+    untracked = _untracked_account_holdings()
+    if not untracked:
+        return []
+
+    if not CLOSING_ACCOUNT_SYNC:
+        if notify:
+            today = datetime.now(KST).date()
+            prev_td = _previous_trading_date(today)
+            hints = [
+                _closing_recovery_env_line(h["code"], h["name"], prev_td.strftime("%Y-%m-%d"))
+                for h in untracked
+            ]
+            names = ", ".join(f"{h['name']}({h['code']})" for h in untracked)
+            notifier.send(
+                "⚠️ <b>봇 미추적 보유 종목 감지</b>\n"
+                f"계좌: {names}\n"
+                "재배포 등으로 종가베팅 상태가 사라졌을 수 있습니다.\n\n"
+                "Railway Variables에 아래를 추가 후 Redeploy 하세요:\n"
+                f"<code>CLOSING_RECOVERY_POSITIONS={','.join(hints)}</code>\n\n"
+                "또는 <code>CLOSING_ACCOUNT_SYNC=true</code> 로 자동 복원(블랙리스트·제외 목록 제외)."
+            )
+        return []
+
+    recovered: list[str] = []
+    today = datetime.now(KST).date()
+    default_buy = _previous_trading_date(today).strftime("%Y-%m-%d")
+    for h in untracked:
+        code = h["code"]
+        if code in _closing_positions:
+            continue
+        _closing_positions[code] = {
+            "name": h["name"],
+            "quantity": h["quantity"],
+            "buy_price": h["buy_price"],
+            "strategy": "종가베팅",
+            "buy_reason": "계좌 동기화 복원",
+            "buy_date": default_buy,
+        }
+        recovered.append(code)
+        notifier.send(
+            f"♻️ 종가베팅 계좌 동기화 복원\n"
+            f"종목: {h['name']} ({code})\n"
+            f"수량: {h['quantity']}주 / 평균단가: {h['buy_price']:,}원\n"
+            f"매수일(추정): {default_buy} / 다음 09:00 매도 대상"
+        )
+        print(f"[종가동기화] {h['name']}({code}) {h['quantity']}주 @ {h['buy_price']:,}")
+
+    if recovered:
+        _save_state()
+    return recovered
 
 
 def _market_minutes() -> int:
@@ -923,6 +1061,7 @@ def run_morning_sell_closing_bet() -> None:
         return
 
     recover_configured_closing_positions()
+    sync_closing_positions_from_account(notify=True)
     reconcile_positions_with_account()
 
     if _k1_closing_positions:
@@ -1639,9 +1778,12 @@ def _check_closing_bet_entry() -> None:
                     cash = max(0, cash - invested)
                 bought_this_slot += 1
                 rank_note = f"우선순위 {rank}위 (점수 {stock.get('priority_score', 0)})"
+                buy_date = _today_kst()
+                recovery_line = _closing_recovery_env_line(code, name, buy_date)
                 notifier.notify_buy(
                     name, code, quantity, int(current),
-                    f"[종가베팅] {rank_note} · {stock.get('reason', '')}",
+                    f"[종가베팅] {rank_note} · {stock.get('reason', '')}\n"
+                    f"♻️ 재배포 복구용: <code>{recovery_line}</code>",
                 )
                 print(
                     f"[종가베팅] 매수 {name}({code}) {quantity}주 @ {int(current):,} "
@@ -2719,6 +2861,7 @@ def main():
 
     # 재배포로 상태가 사라진 지정 종가베팅 복원 후 수동매도 상태 동기화
     recover_configured_closing_positions()
+    sync_closing_positions_from_account(notify=False)
     reconcile_positions_with_account(notify_empty=True)
 
     # HTTP API 서버를 별도 스레드로 시작 (텔레그램 봇 연동)
@@ -2822,10 +2965,13 @@ def main():
 
     if is_trading_day():
         # 09:00 이후 재시작: 놓친 전일 종가베팅이 있으면 장중 보충 매도
-        if 9 * 60 <= _init_min <= 15 * 60 + 20 and _due_closing_positions():
-            notifier.send("▶️ 봇 재시작 감지 - 전일 종가베팅 보충 매도")
-            _last_ran["closing_sell"] = _init_today
-            run_morning_sell_closing_bet()
+        if 9 * 60 <= _init_min <= 15 * 60 + 20:
+            if _due_closing_positions():
+                notifier.send("▶️ 봇 재시작 감지 - 전일 종가베팅 보충 매도")
+                _last_ran["closing_sell"] = _init_today
+                run_morning_sell_closing_bet()
+            elif _untracked_account_holdings():
+                sync_closing_positions_from_account(notify=True)
 
         # 09:05~09:30 재시작: 장중매매 스크리닝 즉시 실행
         if 9 * 60 + 5 <= _init_min <= 9 * 60 + 30 and not _watchlist:
