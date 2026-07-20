@@ -39,6 +39,7 @@ ENTRY_5MIN_CONFIRM = os.getenv("ENTRY_5MIN_CONFIRM", "true").lower() == "true"
 ENTRY_5MIN_VOLUME_RATIO = float(os.getenv("ENTRY_5MIN_VOLUME_RATIO", "1.0"))
 UPPER_TAIL_MAX = float(os.getenv("UPPER_TAIL_MAX", "0.35"))  # 윗꼬리 비율 상한
 CLOSING_BET_MIN_RATE = float(os.getenv("CLOSING_BET_MIN_RATE", "1.5"))  # 종가베팅 당일 상승 %
+CLOSING_BET_MAX_RATE = float(os.getenv("CLOSING_BET_MAX_RATE", "15.0"))  # 당일 상승 상한 (추격 방지)
 LOWER_RSI_MAX = float(os.getenv("LOWER_RSI_MAX", "50"))  # 하단매매 RSI 상한
 
 # 마지막 스크리닝 통계 (텔레그램 보고용)
@@ -276,7 +277,7 @@ def screen_closing_bet_candidates(top_n: int = 20) -> list[dict]:
     """종가베팅 후보 선정 (14:00 스크리닝)
 
     조건:
-    - 당일 상승률 1.5% 이상
+    - 당일 상승률 1.5% ~ 15% 미만 (과열·추격 제외)
     - 5일선 위 (상승 추세)
     - 거래량 1.5배 이상 (모멘텀 확인)
     - RSI 40~75 (적정 모멘텀, 과열 아님)
@@ -311,7 +312,7 @@ def screen_closing_bet_candidates(top_n: int = 20) -> list[dict]:
         except ValueError:
             rate = 0.0
 
-        if rate < CLOSING_BET_MIN_RATE:
+        if rate < CLOSING_BET_MIN_RATE or rate >= CLOSING_BET_MAX_RATE:
             continue
 
         try:
