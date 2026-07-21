@@ -7,6 +7,7 @@
   09:10 ~ 14:45 - 5분마다 장중매매 진입/청산 체크
   09:10 ~ 10:30 - 5분마다 낙폭반등 체크 (ENABLE_CRASH_BOUNCE=true 시)
   09:15 ~ 10:30 - 5분마다 V자반등 체크 (ENABLE_V_REVERSAL=true 시)
+  09:15 ~ 14:30 - 강세V 시뮬 (5분·09~10시 2분·후보/보유 1분)
   11:00 - 상태 보고 / 오전 워치리스트 0개 시 보충 스크리닝
   13:15 - 오전 미체결 낙폭반등·V자반등 오후 필터 1회 재검색
   14:00 - 종가베팅 스크리닝
@@ -35,6 +36,7 @@ import k1_closing
 import k2_intraday
 import k1_plus
 import k2_plus
+import strong_v_sim
 
 load_dotenv()
 
@@ -402,6 +404,9 @@ def _save_state() -> None:
         "k1_plus_sim_trades_today": k1_plus.dump_sim_trades_today(),
         "k2_plus_watchlist": k2_plus.dump_watchlist(),
         "k2_plus_sim_trades_today": k2_plus.dump_sim_trades_today(),
+        "strong_v_sim_open": strong_v_sim.dump_open_position(),
+        "strong_v_sim_focus": strong_v_sim.dump_focus_target(),
+        "strong_v_sim_trades_today": strong_v_sim.dump_sim_trades_today(),
         "daily_pnl_ledger": _daily_pnl_ledger,
     }
     try:
@@ -489,6 +494,21 @@ def _load_state() -> None:
                     f"[상태 복원] K2플러스 시뮬 체결 "
                     f"{len(k2_plus.get_sim_trades_today())}건 불러옴"
                 )
+            strong_v_sim.load_open_position(state.get("strong_v_sim_open"))
+            strong_v_sim.load_focus_target(state.get("strong_v_sim_focus"))
+            strong_v_sim.load_sim_trades_today(state.get("strong_v_sim_trades_today", []))
+            if strong_v_sim.get_open_position():
+                pos = strong_v_sim.get_open_position()
+                print(
+                    f"[상태 복원] 강세V 시뮬 보유 "
+                    f"{pos['name']}({pos['code']}) 불러옴"
+                )
+            elif strong_v_sim.get_focus_target():
+                ft = strong_v_sim.get_focus_target()
+                print(
+                    f"[상태 복원] 강세V 시뮬 후보 추적 "
+                    f"{ft['name']}({ft['code']}) 불러옴"
+                )
 
         ledger = state.get("daily_pnl_ledger", [])
         if isinstance(ledger, list):
@@ -546,6 +566,7 @@ def _collect_sim_pnl_today() -> tuple[int, int, list[tuple[str, int, int]]]:
         ("K1플러스", k1_plus.get_sim_trades_today()),
         ("K2플러스", k2_plus.get_sim_trades_today()),
         ("K2", k2_intraday.get_sim_trades_today()),
+        ("강세V", strong_v_sim.get_sim_trades_today()),
     ]
     details: list[tuple[str, int, int]] = []
     total_won = 0
@@ -1480,6 +1501,14 @@ def run_status_report() -> None:
                 f"K2플러스 [시뮬]: 추적 {len(k2_plus.get_watchlist())}개 / "
                 f"보유 {open_kp}개 / 오늘 {len(k2_plus.get_sim_trades_today())}건"
             )
+        if strong_v_sim.is_enabled():
+            open_sv = 1 if strong_v_sim.get_open_position() else 0
+            focus_sv = 1 if strong_v_sim.get_focus_target() else 0
+            lines.append(
+                f"강세V [시뮬]: 보유 {open_sv} / 후보 {focus_sv} / "
+                f"오늘 {len(strong_v_sim.get_sim_trades_today())}건 / "
+                f"주기 {strong_v_sim.get_poll_interval_min()}분"
+            )
         if pos_lines:
             lines.append("📌 장중 보유 종목:")
             lines.extend(pos_lines)
@@ -1549,6 +1578,10 @@ def run_closing_report() -> None:
         k2p_lines = k2_plus.format_summary()
         if k2p_lines:
             lines.extend(k2p_lines)
+            lines.append("")
+        sv_lines = strong_v_sim.format_summary()
+        if sv_lines:
+            lines.extend(sv_lines)
             lines.append("")
         if not _watchlist:
             summary = _last_morning_summary
@@ -1671,6 +1704,11 @@ def run_closing_report() -> None:
     if k2p_lines:
         lines.append("")
         lines.extend(k2p_lines)
+
+    sv_lines = strong_v_sim.format_summary()
+    if sv_lines:
+        lines.append("")
+        lines.extend(sv_lines)
 
     notifier.send("\n".join(lines))
     if datetime.now(KST).weekday() == 4:
@@ -2091,6 +2129,33 @@ def _check_v_reversal_entry(afternoon: bool = False) -> None:
 
         except Exception as e:
             notifier.notify_error(f"{name} V자반등 진입 오류: {e}")
+
+
+def _check_strong_v_sim() -> None:
+    """5분마다 — 강세주 급락 V 시뮬 진입·청산"""
+    if not strong_v_sim.is_enabled() or not strong_v_sim.is_monitor_window():
+        return
+    try:
+        events, api_used = strong_v_sim.run_check()
+        if events:
+            for ev in events:
+                if ev.get("action") == "buy":
+                    notifier.notify_strong_v_sim_buy(
+                        ev["name"], ev["code"], ev["quantity"],
+                        ev["price"], ev["reason"],
+                    )
+                elif ev.get("action") == "sell":
+                    notifier.notify_strong_v_sim_sell(
+                        ev["name"], ev["code"], ev["quantity"],
+                        ev["buy_price"], ev["sell_price"],
+                        ev["profit_pct"], ev["profit_won"],
+                        ev["sell_reason"],
+                    )
+            _save_state()
+            print(f"[강세V시뮬] 이벤트 {len(events)}건 (API {api_used}회)")
+    except Exception as e:
+        print(f"[강세V시뮬] 구간 체크 오류: {e}")
+        notifier.notify_error(f"강세V 시뮬 체크 오류: {e}")
 
 
 def run_afternoon_rebound_scan() -> None:
@@ -2909,6 +2974,7 @@ def _reset_daily_state() -> None:
     k2_intraday.reset_daily_sim_trades()
     k1_plus.reset_daily_sim_trades()
     k2_plus.reset_daily_sim_trades()
+    strong_v_sim.reset_daily_sim_trades()
     _save_state()
     print(f"[일별 초기화] {_today_kst()} 새 거래일 시작")
 
@@ -2979,6 +3045,15 @@ def main():
             f"\n🔷 K2플러스: [시뮬만] / 추적 {len(k2_plus.get_watchlist())}개 / "
             f"세력봉 D1~D{k2_plus.MAX_DAYS_FROM_POWER} K2훼손"
         )
+    sv_note = ""
+    if strong_v_sim.is_enabled():
+        sv_note = (
+            f"\n🟢 강세V: [시뮬만] / "
+            f"스캔 {os.getenv('STRONG_V_SCAN_START', '09:00')}~"
+            f"{os.getenv('STRONG_V_ENTRY_END', '14:30')} / "
+            f"5분(09~10시 2분·후보/보유 1분) / "
+            f"전일종가 -{strong_v_sim.MAX_BELOW_PREV_PCT}% · MA5 ±{strong_v_sim.MA5_BELOW_TOLERANCE_PCT}%"
+        )
     k1_pos_note = ""
     if _k1_closing_positions:
         k1_pos_note = f"\n🔷 K1 종가 보유 {len(_k1_closing_positions)}개 (4일 보유)"
@@ -3016,6 +3091,7 @@ def main():
             f"{k2_note}"
             f"{plus_note}"
             f"{k2p_note}"
+            f"{sv_note}"
             f"{closing_pos_note}"
             f"{k1_pos_note}"
         )
@@ -3052,6 +3128,7 @@ def main():
     last_5min_slot = -1       # 장중매매 5분 슬롯
     last_closing_slot = -1    # 종가베팅 5분 슬롯
     last_screening_slot = -1  # 스크리닝 5분 재시도 슬롯
+    last_strong_v_min = -1    # 강세V 시뮬 가변 주기
 
     while True:
         now = datetime.now(KST)
@@ -3064,6 +3141,7 @@ def main():
             last_5min_slot = -1
             last_closing_slot = -1
             last_screening_slot = -1
+            last_strong_v_min = -1
         _last_ran["date"] = today
 
         # 휴장일·주말: API 서버만 유지, 매매 스케줄은 전부 스킵
@@ -3095,6 +3173,17 @@ def main():
             if slot != last_5min_slot:
                 last_5min_slot = slot
                 run_market_check()
+
+        # ── 09:00~14:50 KST - 강세V 시뮬 (5분 / 09~10시 2분 / 후보·보유 1분) ──
+        if (
+            strong_v_sim.is_enabled()
+            and strong_v_sim.is_monitor_window()
+            and 9 * 60 <= t <= 14 * 60 + 50
+        ):
+            interval = strong_v_sim.get_poll_interval_min()
+            if last_strong_v_min < 0 or t - last_strong_v_min >= interval:
+                last_strong_v_min = t
+                _check_strong_v_sim()
 
         # ── 11:00~11:10 KST - 보충 스크리닝 (오전 워치리스트 0개) ─────────────
         if 11 * 60 <= t <= 11 * 60 + 10 and _last_ran.get("supplementary_screening") != today:

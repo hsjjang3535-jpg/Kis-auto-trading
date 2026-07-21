@@ -331,6 +331,36 @@ def notify_k2_plus_sim_sell(
     )
 
 
+def notify_strong_v_sim_buy(
+    name: str, code: str, quantity: int, price: int, reason: str,
+) -> None:
+    send(
+        f"🟢🟢 <b>[강세V 시뮬] 매수</b>\n"
+        f"종목: {name} ({code})\n"
+        f"수량: {quantity}주 / 가격: {price:,}원\n"
+        f"사유: {reason}\n"
+        f"⚠️ 시뮬만 — 실제 주문 없음 / V자·MA5 완화 필터"
+    )
+
+
+def notify_strong_v_sim_sell(
+    name: str, code: str, quantity: int,
+    buy_price: int, sell_price: int,
+    profit_pct: float, profit_won: int, reason: str,
+) -> None:
+    emoji = "📈" if profit_won >= 0 else "📉"
+    sign = "+" if profit_won >= 0 else ""
+    send(
+        f"🟢{emoji} <b>[강세V 시뮬] 매도</b>\n"
+        f"종목: {name} ({code})\n"
+        f"수량: {quantity}주\n"
+        f"매수가: {buy_price:,}원 → 매도가: {sell_price:,}원\n"
+        f"수익률: {sign}{profit_pct:.2f}% ({sign}{profit_won:,}원)\n"
+        f"사유: {reason}\n"
+        f"⚠️ 시뮬만 — 실제 주문 없음"
+    )
+
+
 def notify_screening_result(candidates: list) -> None:
     if not candidates:
         send("🔍 오늘 종가베팅 후보 없음")
