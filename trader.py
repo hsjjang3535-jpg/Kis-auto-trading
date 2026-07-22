@@ -50,6 +50,9 @@ CLOSING_ACCOUNT_SYNC = os.getenv("CLOSING_ACCOUNT_SYNC", "false").lower() == "tr
 STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "2.0"))
 TAKE_PROFIT_PCT = float(os.getenv("TAKE_PROFIT_PCT", "3.0"))
 TRAILING_STOP_PCT = float(os.getenv("TRAILING_STOP_PCT", "1.0"))
+# 매수 직후 빠른 손절 (가짜 돌파 조기 청산) — 창 지나면 기존 STOP_LOSS_PCT 적용
+QUICK_STOP_LOSS_PCT = float(os.getenv("QUICK_STOP_LOSS_PCT", "1.5"))
+QUICK_STOP_WINDOW_MIN = int(os.getenv("QUICK_STOP_WINDOW_MIN", "30"))
 # 동적 자금 관리: True면 매일 실제 예수금으로 한도 자동 조절
 DYNAMIC_CAPITAL = os.getenv("DYNAMIC_CAPITAL", "true").lower() == "true"
 # 1회 매수금액 = 예수금의 이 비율 (기본 50%)
@@ -2019,6 +2022,7 @@ def _check_crash_bounce_entry(afternoon: bool = False) -> None:
                     "peak_price": int(current),
                     "strategy": crash_bounce.STRATEGY,
                     "buy_reason": stock.get("reason", ""),
+                    "buy_time": datetime.now(KST).isoformat(),
                     "exit_ma60": stock.get("ma60", 0),
                     "ma_period": stock.get("ma_period", 60),
                     "entry_session": "afternoon" if afternoon else "morning",
@@ -2106,6 +2110,7 @@ def _check_v_reversal_entry(afternoon: bool = False) -> None:
                     "peak_price": int(current),
                     "strategy": v_reversal.STRATEGY,
                     "buy_reason": stock.get("reason", ""),
+                    "buy_time": datetime.now(KST).isoformat(),
                     "exit_ma60": stock.get("ma60", 0),
                     "ma_period": stock.get("ma_period", 60),
                     "entry_session": "afternoon" if afternoon else "morning",
@@ -2787,6 +2792,7 @@ def _check_entry() -> None:
                     "peak_price": int(current),  # 트레일링 스탑용 고점 추적
                     "strategy": strategy,
                     "buy_reason": buy_reason,
+                    "buy_time": datetime.now(KST).isoformat(),
                 }
                 _save_state()
                 already_held.add(code)
@@ -2812,6 +2818,35 @@ def _check_entry() -> None:
 
 # ── 청산 로직 ─────────────────────────────────────────────────────────────────
 
+def _minutes_since_buy(pos: dict) -> float | None:
+    """매수 후 경과 분. buy_time 없으면 None (빠른손절 스킵)."""
+    raw = pos.get("buy_time")
+    if not raw:
+        return None
+    try:
+        bought = datetime.fromisoformat(str(raw))
+        if bought.tzinfo is None:
+            bought = bought.replace(tzinfo=KST)
+        return (datetime.now(KST) - bought).total_seconds() / 60.0
+    except (TypeError, ValueError):
+        return None
+
+
+def _quick_stop_hit(pos: dict, profit_pct: float) -> tuple[bool, str]:
+    """매수 직후 창 안이면 더 타이트한 손절 적용."""
+    if QUICK_STOP_LOSS_PCT <= 0 or QUICK_STOP_WINDOW_MIN <= 0:
+        return False, ""
+    elapsed = _minutes_since_buy(pos)
+    if elapsed is None or elapsed > QUICK_STOP_WINDOW_MIN:
+        return False, ""
+    if profit_pct <= -QUICK_STOP_LOSS_PCT:
+        return True, (
+            f"빠른손절 ({profit_pct:.1f}%, 매수 후 {elapsed:.0f}분/"
+            f"{QUICK_STOP_WINDOW_MIN}분·−{QUICK_STOP_LOSS_PCT:g}%)"
+        )
+    return False, ""
+
+
 def _check_exit() -> None:
     """보유 포지션 익절(트레일링 스탑)/손절 조건 체크"""
     if not _positions:
@@ -2826,6 +2861,11 @@ def _check_exit() -> None:
             current = float(info.get("stck_prpr", pos["buy_price"]))
             profit_pct = (current - pos["buy_price"]) / pos["buy_price"] * 100
             strategy = pos.get("strategy", "")
+
+            quick, quick_reason = _quick_stop_hit(pos, profit_pct)
+            if quick:
+                _execute_sell(code, pos, quick_reason, current, profit_pct)
+                continue
 
             # 낙폭반등: 5분봉 MA 저항·전용 손익
             if strategy == crash_bounce.STRATEGY:
@@ -3083,7 +3123,9 @@ def main():
             "📌 장중매매: 09:05 스크리닝 → 09:10~14:30 진입 → 14:50 강제청산\n"
             f"   장중 AI: {'ON (Groq)' if ENABLE_INTRADAY_AI else 'OFF (기술조건만)'}\n"
             "🌙 종가: 14:00 스크리닝 → 14:45 AI매수(익일09:00매도) / 금 K1종가\n"
-            f"✅ 익절 트레일링 +{TAKE_PROFIT_PCT}% / 손절 -{STOP_LOSS_PCT}% / 15:10 손익보고"
+            f"✅ 익절 트레일링 +{TAKE_PROFIT_PCT}% / "
+            f"손절 −{STOP_LOSS_PCT}% (매수 {QUICK_STOP_WINDOW_MIN}분 내 −{QUICK_STOP_LOSS_PCT}%) / "
+            f"15:10 손익보고"
             f"{crash_note}"
             f"{v_note}"
             f"{ul_note}"
