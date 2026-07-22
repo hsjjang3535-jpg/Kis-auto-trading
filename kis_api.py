@@ -434,7 +434,12 @@ def get_daily_chart(stock_code: str, days: int = 200) -> list[dict]:
     return data.get("output2", [])
 
 def get_minute_chart(stock_code: str, hour: str | None = None) -> list[dict]:
-    """당일 1분봉 조회 (기준 시각 이전 최대 30개)"""
+    """당일 1분봉 조회 (기준 시각 이전 최대 30개)
+
+    KIS 주식당일분봉조회[v1_국내주식-022] FHKST03010200.
+    2025~ 스펙에서 FID_ETC_CLS_CODE가 필수로 추가됨.
+    (누락 시: ERROR INPUT FIELD NOT FOUND [FID_ETC_CLS_CODE])
+    """
     if not hour:
         hour = datetime.now(KST).strftime("%H%M%S")
     data = _market_get(
@@ -445,8 +450,7 @@ def get_minute_chart(stock_code: str, hour: str | None = None) -> list[dict]:
             "fid_input_iscd": stock_code,
             "fid_input_hour_1": hour,
             "fid_pw_data_incu_yn": "Y",
-            "fid_fake_tick_incu_yn": "N",
-            "fid_adj_stck_prc": "1",
+            "fid_etc_cls_code": "",  # 필수 (기본값 빈 문자열)
         },
     )
     return data.get("output2", [])
