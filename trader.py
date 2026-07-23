@@ -2633,13 +2633,22 @@ def _check_k1_closing_exit() -> None:
 
 # ── 장중매매 진입 로직 ─────────────────────────────────────────────────────────
 
-def _confirm_5min_entry(code: str) -> tuple[bool, str]:
+def _confirm_5min_entry(
+    code: str,
+    min_vol_ratio: float | None = None,
+) -> tuple[bool, str]:
     """매수 직전 5분봉 확인: 최근 완료 봉이 양봉·상승·거래량 동반인지 검사.
 
     워치리스트 전체가 아니라 일·기술적 조건을 통과한 소수 종목에만 호출한다.
     """
     if not screener.ENTRY_5MIN_CONFIRM:
         return True, ""
+
+    vol_need = (
+        screener.ENTRY_5MIN_VOLUME_RATIO
+        if min_vol_ratio is None
+        else float(min_vol_ratio)
+    )
 
     try:
         # 최근 40분이면 5분봉 확인에 충분 — API 호출 수 절약
@@ -2665,12 +2674,62 @@ def _confirm_5min_entry(code: str) -> tuple[bool, str]:
         return False, "5분봉 거래량 비교 불가"
     avg_vol = sum(b.get("volume", 0) for b in prior) / len(prior)
     vol_ratio = (signal.get("volume", 0) / avg_vol) if avg_vol > 0 else 0.0
-    if vol_ratio < screener.ENTRY_5MIN_VOLUME_RATIO:
+    if vol_ratio < vol_need:
         return False, (
-            f"5분봉 거래량 부족 ({vol_ratio:.1f}x "
-            f"< {screener.ENTRY_5MIN_VOLUME_RATIO:g}x)"
+            f"5분봉 거래량 부족 ({vol_ratio:.1f}x < {vol_need:g}x)"
         )
     return True, f"5분봉 양봉·거래량 {vol_ratio:.1f}x"
+
+
+def _breakout_entry_mode(
+    current: float,
+    high_20: float,
+    ma5: float,
+) -> tuple[str | None, str]:
+    """돌파 진입 모드. Returns (mode|None, skip_reason).
+
+    mode: "safe" | "momentum"
+    둘 다 가능하면 safe 우선.
+    """
+    if high_20 <= 0 or current < high_20 * 0.995:
+        return None, f"20일고가 미돌파 ({current:,.0f} < {high_20 * 0.995:,.0f})"
+    if ma5 <= 0 or current < ma5:
+        return None, f"MA5 하회 ({current:,.0f} < {ma5:,.0f})"
+
+    high_ext = (current - high_20) / high_20 * 100
+    ma5_gap = (current - ma5) / ma5 * 100
+
+    safe_ok = (
+        high_ext <= screener.BREAKOUT_HIGH20_MAX_PCT
+        and ma5_gap <= screener.BREAKOUT_MA5_GAP_MAX
+    )
+    if safe_ok:
+        return "safe", ""
+
+    now_min = datetime.now(KST).hour * 60 + datetime.now(KST).minute
+    in_mom_window = (
+        screener.BREAKOUT_MOMENTUM_ENABLED
+        and screener.BREAKOUT_MOMENTUM_START_MIN
+        <= now_min
+        <= screener.BREAKOUT_MOMENTUM_END_MIN
+    )
+    mom_ok = (
+        in_mom_window
+        and high_ext <= screener.BREAKOUT_MOMENTUM_HIGH20_MAX_PCT
+        and ma5_gap <= screener.BREAKOUT_MOMENTUM_MA5_GAP_MAX
+    )
+    if mom_ok:
+        return "momentum", ""
+
+    if not in_mom_window and screener.BREAKOUT_MOMENTUM_ENABLED:
+        return None, (
+            f"돌파 과열 (고가+{high_ext:.1f}%/MA5+{ma5_gap:.1f}%) "
+            f"— 안전 한도 초과, 모멘텀 시간대 아님"
+        )
+    return None, (
+        f"돌파 과열 (고가+{high_ext:.1f}% > {screener.BREAKOUT_HIGH20_MAX_PCT:g}% "
+        f"또는 MA5+{ma5_gap:.1f}% > {screener.BREAKOUT_MA5_GAP_MAX:g}%)"
+    )
 
 
 def _check_entry() -> None:
@@ -2713,6 +2772,7 @@ def _check_entry() -> None:
 
             entry_ok = False
             skip_reason = ""
+            stock.pop("_breakout_mode", None)
             if strategy == "상단매매":
                 if current < ma5:
                     skip_reason = f"MA5 하회 ({current:,.0f} < {ma5:,.0f})"
@@ -2738,12 +2798,12 @@ def _check_entry() -> None:
                 else:
                     entry_ok = True
             elif strategy == "돌파매매":
-                if high_20 <= 0 or current < high_20 * 0.995:
-                    skip_reason = f"20일고가 미돌파 ({current:,.0f} < {high_20*0.995:,.0f})"
-                elif current < ma5:
-                    skip_reason = f"MA5 하회 ({current:,.0f} < {ma5:,.0f})"
+                mode, skip_reason = _breakout_entry_mode(current, high_20, ma5)
+                if mode is None:
+                    pass  # skip_reason already set
                 else:
                     entry_ok = True
+                    stock["_breakout_mode"] = mode
 
             if not entry_ok:
                 print(f"[진입 미충족] {name}({strategy}): {skip_reason}")
@@ -2751,14 +2811,23 @@ def _check_entry() -> None:
                 stock["_skip_reason"] = skip_reason
                 continue
 
-            candle_ok, candle_msg = _confirm_5min_entry(code)
+            breakout_mode = stock.get("_breakout_mode", "")
+            vol_min = (
+                screener.BREAKOUT_MOMENTUM_5MIN_VOL
+                if strategy == "돌파매매" and breakout_mode == "momentum"
+                else None
+            )
+            candle_ok, candle_msg = _confirm_5min_entry(code, min_vol_ratio=vol_min)
             if not candle_ok:
                 print(f"[진입 미충족] {name}({strategy}): {candle_msg}")
                 stock["_skip_reason"] = candle_msg
                 continue
 
-            # 매수 실행
-            buy_amount = min(MAX_BUY_AMOUNT, remaining)
+            # 매수 실행 (돌파 모멘텀은 소액, 안전·그 외는 정상 한도)
+            cap = MAX_BUY_AMOUNT
+            if strategy == "돌파매매" and breakout_mode == "momentum":
+                cap = max(int(MAX_BUY_AMOUNT * screener.BREAKOUT_MOMENTUM_BUY_RATIO), 1)
+            buy_amount = min(cap, remaining)
             quantity = buy_amount // int(current)
             if quantity < 1:
                 print(
@@ -2779,6 +2848,14 @@ def _check_entry() -> None:
                 invested = quantity * int(current)
                 _total_invested_today += invested
                 buy_reason = stock.get("reason", "")
+                if strategy == "돌파매매" and breakout_mode == "safe":
+                    tag = "돌파-안전"
+                elif strategy == "돌파매매" and breakout_mode == "momentum":
+                    tag = "돌파-모멘텀(소액)"
+                else:
+                    tag = ""
+                if tag:
+                    buy_reason = f"{tag} · {buy_reason}".strip(" ·") if buy_reason else tag
                 if candle_msg:
                     buy_reason = (
                         f"{buy_reason} · {candle_msg}".strip(" ·")
@@ -2793,6 +2870,7 @@ def _check_entry() -> None:
                     "strategy": strategy,
                     "buy_reason": buy_reason,
                     "buy_time": datetime.now(KST).isoformat(),
+                    "breakout_mode": breakout_mode or "",
                 }
                 _save_state()
                 already_held.add(code)
