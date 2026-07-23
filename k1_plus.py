@@ -3,7 +3,8 @@ K1플러스 — 시뮬만 (5장)
 
 - 세력봉(거래대금 500억+) 당일, 상한가 케이스는 K1 실전에 양보
 - 5분/일봉 피보: 0.236=K1, 0.5=K2
-- K1 훼손 + 당일 양봉 → 종가대 가상 매수
+- K1 훼손 + 당일 양봉 → 가상 매수
+  (기본: 모니터 구간 중 훼손 즉시 / 옵션: 종가창만)
 - 매수 4일차 전량 가상 청산
 - 실제 주문 없음. 우선순위: K1실전 > K1플러스 > K2플러스 > K2 > 리바운딩
 """
@@ -47,6 +48,8 @@ ENTRY_START_MIN = _parse_hhmm(os.getenv("K1_PLUS_ENTRY_START", "14:20"), 14, 20)
 ENTRY_END_MIN = _parse_hhmm(os.getenv("K1_PLUS_ENTRY_END", "14:50"), 14, 50)
 MONITOR_START_MIN = _parse_hhmm(os.getenv("K1_PLUS_MONITOR_START", "09:10"), 9, 10)
 MONITOR_END_MIN = _parse_hhmm(os.getenv("K1_PLUS_MONITOR_END", "14:50"), 14, 50)
+# true(기본)=모니터 중 K1 훼손 즉시 매수 / false=종가창(ENTRY_START~END)만
+IMMEDIATE_ON_BREACH = _env_bool("K1_PLUS_IMMEDIATE_ON_BREACH", True)
 MIN_TRADING_VALUE = int(os.getenv("K1_PLUS_MIN_TRADING_VALUE", "50000000000"))
 MIN_DAY_RATE = float(os.getenv("K1_PLUS_MIN_DAY_RATE", "5.0"))  # 세력봉 근사: 당일 +5%↑
 FORCE_SELL_DAY = int(os.getenv("K1_PLUS_FORCE_SELL_DAY", "4"))
@@ -68,10 +71,20 @@ def is_trading_weekday() -> bool:
 
 
 def is_entry_window() -> bool:
+    """종가창 진입 (IMMEDIATE_ON_BREACH=false 일 때만 사용)."""
     if not ENABLED or not is_trading_weekday():
         return False
     t = datetime.now(KST).hour * 60 + datetime.now(KST).minute
     return ENTRY_START_MIN <= t <= ENTRY_END_MIN
+
+
+def is_buy_allowed() -> bool:
+    """시뮬 매수 허용 시각."""
+    if not ENABLED or not is_trading_weekday():
+        return False
+    if IMMEDIATE_ON_BREACH:
+        return is_monitor_window()
+    return is_entry_window()
 
 
 def is_monitor_window() -> bool:
@@ -276,7 +289,7 @@ def _open_sim(entry: dict, price: int) -> dict | None:
         "quantity": qty,
         "price": price,
         "k1": entry.get("k1", 0),
-        "reason": f"[K1+시뮬] 세력봉 당일 양봉종배 K1 {entry.get('k1', 0):,} 훼손",
+        "reason": f"[K1+시뮬] K1 {entry.get('k1', 0):,} 훼손 즉시 매수",
     }
 
 
@@ -424,7 +437,7 @@ def scan_new_candidates(api_budget: int | None = None) -> tuple[list[dict], int]
 
 
 def check_alerts(api_budget: int | None = None) -> tuple[list[dict], list[str], int]:
-    """종가대 매수 + 보유 청산 (현재가/시세만)"""
+    """K1 훼손 매수 + 보유 청산 (현재가/시세만)."""
     if not ENABLED or not _watchlist or not is_trading_weekday():
         return [], [], 0
 
@@ -433,7 +446,7 @@ def check_alerts(api_budget: int | None = None) -> tuple[list[dict], list[str], 
     alerts: list[dict] = []
     removed: list[str] = []
     k1_codes = k1_closing.get_priority_codes() if k1_closing.is_enabled() else set()
-    in_entry = is_entry_window()
+    buy_ok = is_buy_allowed()
 
     for code in list(_watchlist.keys()):
         if used >= budget:
@@ -512,18 +525,21 @@ def check_alerts(api_budget: int | None = None) -> tuple[list[dict], list[str], 
             continue
 
         if (
-            in_entry
+            buy_ok
             and _k1_breached(current, k1)
             and _is_bullish(info, current)
             and not _already_sent(entry, "BUY")
         ):
             _mark_sent(entry, "BUY")
             sim = _open_sim(entry, current_i)
+            mode_label = "훼손 즉시" if IMMEDIATE_ON_BREACH else "종가창"
             alerts.append({
                 "type": "BUY",
                 "entry": entry,
                 "current": current_i,
-                "message": f"K1 {k1:,} 훼손 + 당일 양봉 → 종가베팅 (시뮬)",
+                "message": (
+                    f"K1 {k1:,} 훼손 + 당일 양봉 → {mode_label} 매수 (시뮬)"
+                ),
                 "sim": sim,
             })
 
@@ -563,7 +579,7 @@ def format_summary() -> list[str]:
         if not _sim_is_open(e) and e.get("power_date") == _today()
     ]
     if waiting:
-        lines.append(f"💠 K1+ 추적 {len(waiting)}개 (세력봉 당일·종가대)")
+        lines.append(f"💠 K1+ 추적 {len(waiting)}개 (세력봉 당일·K1훼손 대기)")
         for e in waiting[:3]:
             lines.append(f"   {e['name']}({e['code']}) K1 {e['k1']:,}")
     return lines

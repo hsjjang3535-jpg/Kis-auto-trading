@@ -3075,9 +3075,10 @@ def main():
         )
     plus_note = ""
     if k1_plus.is_enabled():
+        mode = "K1훼손 즉시" if k1_plus.IMMEDIATE_ON_BREACH else "종가창만"
         plus_note = (
             f"\n💠 K1플러스: [시뮬만] / 추적 {len(k1_plus.get_watchlist())}개 / "
-            f"세력봉 당일 양봉종가"
+            f"{mode} / 세력봉 당일 양봉"
         )
     k2p_note = ""
     if k2_plus.is_enabled():
