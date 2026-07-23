@@ -5,9 +5,10 @@
 > 복사본은 **비밀번호 관리자**(1Password, Bitwarden 등)에 보관하세요.
 
 **서비스:** `Kis-auto-trading` (production)  
-**백업 태그:** `v4.0-stable` (2026-07-14, commit `b553ed9`)  
-**공개 스냅샷:** [railway-public-snapshot.env](./railway-public-snapshot.env)  
+**백업 태그:** `v4.0-stable` (2026-07-14, commit `b553ed9`) — 코드 롤백용  
+**공개 스냅샷:** [railway-public-snapshot.env](./railway-public-snapshot.env) (2026-07-23 운영 설정 갱신)  
 **시크릿 로컬 백업:** `backups/railway-env-LATEST.env` (gitignore)  
+**동기화:** `python scripts/sync_railway_vars.py`  
 **복구 가이드:** [RESTORE.md](./RESTORE.md)
 
 ---

@@ -2,17 +2,24 @@
 
 초기화·오배포 후 **코드 + Variables**를 이 가이드로 되돌립니다.
 
-## 백업 구성 (2026-07-14 / v4.0-stable)
+## 백업 구성 (2026-07-23 갱신)
 
 | 종류 | 위치 | 내용 |
 |------|------|------|
-| 코드 | Git 태그 `v4.0-stable` | K2+ 시뮬·우선순위 A 포함 (`b553ed9`) |
+| 코드 | Git `main` (최신) / 태그 `v4.0-stable` | 돌파 안전·모멘텀, 강세V 시뮬, 빠른손절 등 |
 | 공개 설정 | [`railway-public-snapshot.env`](./railway-public-snapshot.env) | 시크릿 없는 Variables 스냅샷 (커밋됨) |
 | 시크릿 | `backups/railway-env-LATEST.env` | 로컬 전용 (gitignore). KIS/텔레그램/Groq 등 |
+| 동기화 스크립트 | [`scripts/sync_railway_vars.py`](./scripts/sync_railway_vars.py) | Railway 변수 upsert + 백업 생성 |
 | 체크리스트 | [`RAILWAY_VARIABLES.md`](./RAILWAY_VARIABLES.md) | 변수 설명 |
 
 > Railway Dashboard에 “설정 파일 업로드” 기능은 없습니다.  
 > **Variables Raw Editor에 붙여 넣는 방식**이 복구입니다.
+
+로컬에서 다시 Railway에 맞추려면 (시크릿은 덮어쓰지 않고 PATCH만 upsert):
+
+```bash
+python scripts/sync_railway_vars.py
+```
 
 ---
 
