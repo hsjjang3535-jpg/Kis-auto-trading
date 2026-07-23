@@ -317,6 +317,9 @@ _v_reversal_invested_today: int = 0
 
 # 장중 금액 부족 알림 (종목당 1회)
 _intraday_low_cash_notified: set[str] = set()
+# 주문가능금액 초과 등 매수 실패 횟수 (종목당, 3회면 당일 스킵)
+MAX_BUY_CASH_FAILS = int(os.getenv("MAX_BUY_CASH_FAILS", "3"))
+_buy_cash_fail_counts: dict[str, int] = {}
 # 당일 매도한 장중 종목 — 재진입 금지
 _sold_codes_today: set[str] = set()
 
@@ -394,6 +397,7 @@ def _save_state() -> None:
         "trades_today": _trades_today,
         "sold_codes_today": sorted(_sold_codes_today),
         "intraday_low_cash_notified": sorted(_intraday_low_cash_notified),
+        "buy_cash_fail_counts": dict(_buy_cash_fail_counts),
         "closing_positions": _closing_positions,       # 오버나이트 유지
         "closing_invested_today": _closing_invested_today,
         "ul_rebound_watchlist": ul_rebound.dump_watchlist(),
@@ -424,6 +428,7 @@ def _load_state() -> None:
     global _closing_positions, _closing_invested_today, _crash_bounce_invested_today
     global _v_reversal_invested_today, _k1_closing_positions
     global _daily_pnl_ledger, _sold_codes_today, _intraday_low_cash_notified
+    global _buy_cash_fail_counts
     if not os.path.exists(_STATE_FILE):
         return
     try:
@@ -546,6 +551,13 @@ def _load_state() -> None:
                 if isinstance(low_cash_raw, list)
                 else set()
             )
+            fail_raw = state.get("buy_cash_fail_counts", {})
+            if isinstance(fail_raw, dict):
+                _buy_cash_fail_counts = {
+                    str(k): int(v)
+                    for k, v in fail_raw.items()
+                    if k and int(v) > 0
+                }
             if _positions:
                 print(f"[상태 복원] 장중 포지션 {len(_positions)}개 불러옴")
             if _sold_codes_today:
@@ -1095,6 +1107,54 @@ def _is_already_sold_error(msg: str) -> bool:
     text = (msg or "").lower()
     keys = ("잔고", "수량", "매도가능", "보유", "부족", "주문가능수량이")
     return any(k in text for k in keys)
+
+
+def _is_insufficient_orderable_cash(msg: str | BaseException) -> bool:
+    """KIS 주문가능금액 초과(APBK0952 등) 여부."""
+    text = str(msg or "")
+    return "APBK0952" in text or "주문가능금액" in text
+
+
+def _is_buy_cash_blocked(code: str) -> bool:
+    """주문가능금액 초과 실패가 MAX_BUY_CASH_FAILS회 이상이면 당일 매수 스킵."""
+    return _buy_cash_fail_counts.get(code, 0) >= MAX_BUY_CASH_FAILS
+
+
+def _record_buy_cash_fail(code: str, name: str, detail: str | BaseException, kind: str) -> int:
+    """
+    주문가능금액 초과 실패 기록.
+    알림은 종목당 1회. 실패 3회면 당일 해당 종목 매수 중단.
+    반환: 누적 실패 횟수
+    """
+    n = _buy_cash_fail_counts.get(code, 0) + 1
+    _buy_cash_fail_counts[code] = n
+    _save_state()
+    msg = str(detail)
+    if code not in _intraday_low_cash_notified:
+        _intraday_low_cash_notified.add(code)
+        if n >= MAX_BUY_CASH_FAILS:
+            tip = f"({n}/{MAX_BUY_CASH_FAILS}회) — 당일 이 종목 재시도 안 함"
+        else:
+            tip = (
+                f"({n}/{MAX_BUY_CASH_FAILS}회) — "
+                f"조건 재충족 시 최대 {MAX_BUY_CASH_FAILS}회까지 재시도"
+            )
+        notifier.notify_error(f"{name} {kind}: 주문가능금액 초과 {tip}\n{msg}")
+    else:
+        blocked = " → 당일 스킵" if n >= MAX_BUY_CASH_FAILS else ""
+        print(
+            f"[매수실패] {name} 주문가능금액 초과 "
+            f"{n}/{MAX_BUY_CASH_FAILS}회 (알림 생략){blocked}"
+        )
+    return n
+
+
+def _notify_buy_error_once(code: str, name: str, detail: str | BaseException, kind: str) -> None:
+    """매수 실패 알림. 주문가능금액 초과는 횟수 제한·1회 알림."""
+    if _is_insufficient_orderable_cash(detail):
+        _record_buy_cash_fail(code, name, detail, kind)
+        return
+    notifier.notify_error(f"{name} {kind}: {detail}")
 
 
 def _due_closing_positions() -> dict[str, dict]:
@@ -1789,6 +1849,7 @@ def _check_closing_bet_entry() -> None:
         s for s in _closing_watchlist
         if s["code"] not in already_held
         and s["code"] not in _closing_low_cash_skipped
+        and not _is_buy_cash_blocked(s["code"])
     ]
     if not candidates:
         return
@@ -1898,7 +1959,10 @@ def _check_closing_bet_entry() -> None:
                 break  # 1종목 보유 — 체결 후 추가 시도 없음
             else:
                 msg = result.get("msg1", "알 수 없는 오류")
-                notifier.notify_error(f"{name} 종가베팅 매수 실패: {msg}")
+                if _is_insufficient_orderable_cash(msg):
+                    _record_buy_cash_fail(code, name, msg, "종가베팅 매수 실패")
+                else:
+                    notifier.notify_error(f"{name} 종가베팅 매수 실패: {msg}")
 
             time.sleep(kis_api.trade_interval())
 
@@ -1916,7 +1980,10 @@ def _check_closing_bet_entry() -> None:
                     f"(모의 API 한도·서버 오류. 5분 후 재시도)"
                 )
                 break
-            notifier.notify_error(f"{name} 종가베팅 진입 오류: {e}")
+            if _is_insufficient_orderable_cash(e):
+                _record_buy_cash_fail(code, name, e, "종가베팅 진입 오류")
+            else:
+                notifier.notify_error(f"{name} 종가베팅 진입 오류: {e}")
 
 
 def _execute_closing_sell(code: str, pos: dict, reason: str) -> None:
@@ -2000,6 +2067,8 @@ def _check_crash_bounce_entry(afternoon: bool = False) -> None:
             continue
         if code in _sold_codes_today:
             continue
+        if _is_buy_cash_blocked(code):
+            continue
 
         try:
             current = kis_api.get_current_price(code, fallback=stock.get("current"))
@@ -2040,12 +2109,12 @@ def _check_crash_bounce_entry(afternoon: bool = False) -> None:
                     break
             else:
                 msg = result.get("msg1", "알 수 없는 오류")
-                notifier.notify_error(f"{name} 낙폭반등 매수 실패: {msg}")
+                _notify_buy_error_once(code, name, msg, "낙폭반등 매수 실패")
 
             time.sleep(0.5)
 
         except Exception as e:
-            notifier.notify_error(f"{name} 낙폭반등 진입 오류: {e}")
+            _notify_buy_error_once(code, name, e, "낙폭반등 진입 오류")
 
 
 # ── V자반등 진입 로직 ──────────────────────────────────────────────────────────
@@ -2088,6 +2157,8 @@ def _check_v_reversal_entry(afternoon: bool = False) -> None:
             continue
         if code in _sold_codes_today:
             continue
+        if _is_buy_cash_blocked(code):
+            continue
 
         try:
             current = kis_api.get_current_price(code, fallback=stock.get("current"))
@@ -2128,12 +2199,12 @@ def _check_v_reversal_entry(afternoon: bool = False) -> None:
                     break
             else:
                 msg = result.get("msg1", "알 수 없는 오류")
-                notifier.notify_error(f"{name} V자반등 매수 실패: {msg}")
+                _notify_buy_error_once(code, name, msg, "V자반등 매수 실패")
 
             time.sleep(0.5)
 
         except Exception as e:
-            notifier.notify_error(f"{name} V자반등 진입 오류: {e}")
+            _notify_buy_error_once(code, name, e, "V자반등 진입 오류")
 
 
 def _check_strong_v_sim() -> None:
@@ -2747,7 +2818,9 @@ def _check_entry() -> None:
     # 매수 직전에도 우선순위 재정렬 (점수 높은 종목부터)
     pending = _sort_intraday_watchlist([
         s for s in _watchlist
-        if s["code"] not in already_held and s["code"] not in _sold_codes_today
+        if s["code"] not in already_held
+        and s["code"] not in _sold_codes_today
+        and not _is_buy_cash_blocked(s["code"])
     ])
 
     for stock in pending:
@@ -2881,7 +2954,7 @@ def _check_entry() -> None:
                     break
             else:
                 msg = result.get("msg1", "알 수 없는 오류")
-                notifier.notify_error(f"{name} 매수 실패: {msg}")
+                _notify_buy_error_once(code, name, msg, "매수 실패")
 
             time.sleep(0.5)
 
@@ -2891,7 +2964,7 @@ def _check_entry() -> None:
                     f"⚠️ <b>{name} 매수 중단 — 계좌 설정 오류</b>\n{e}"
                 )
                 break
-            notifier.notify_error(f"{name} 진입 체크 오류: {e}")
+            _notify_buy_error_once(code, name, e, "진입 체크 오류")
 
 
 # ── 청산 로직 ─────────────────────────────────────────────────────────────────
@@ -3072,7 +3145,7 @@ def _reset_daily_state() -> None:
     global _v_reversal_invested_today
     global _closing_low_cash_notified, _closing_low_cash_skipped
     global _closing_depleted_notified, _closing_balance_fail_notified
-    global _sold_codes_today, _intraday_low_cash_notified
+    global _sold_codes_today, _intraday_low_cash_notified, _buy_cash_fail_counts
     _watchlist = []
     _closing_watchlist = []
     _trades_today = []
@@ -3086,6 +3159,7 @@ def _reset_daily_state() -> None:
     _closing_balance_fail_notified = False
     _sold_codes_today = set()
     _intraday_low_cash_notified = set()
+    _buy_cash_fail_counts = {}
     # _closing_positions는 초기화 안 함 - 오버나이트 포지션 유지
     ul_rebound.reset_daily_sim_trades()
     k1_closing.reset_daily_sim_trades()
