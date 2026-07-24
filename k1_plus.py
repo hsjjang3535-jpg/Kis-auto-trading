@@ -5,7 +5,8 @@ K1플러스 — 시뮬만 (5장)
 - 5분/일봉 피보: 0.236=K1, 0.5=K2
 - K1 훼손 + 당일 양봉 → 가상 매수
   (기본: 모니터 구간 중 훼손 즉시 / 옵션: 종가창만)
-- 매수 4일차 전량 가상 청산
+- 진입: 피보 저점까지 거리 > N%면 스킵 (기본 8%)
+- 청산: 매수가 −5% 손절 / 피보 고·저 / 4일차 강제
 - 실제 주문 없음. 우선순위: K1실전 > K1플러스 > K2플러스 > K2 > 리바운딩
 """
 from __future__ import annotations
@@ -60,6 +61,10 @@ MAX_WATCH = int(os.getenv("K1_PLUS_MAX_WATCH", "5"))
 LEVEL_TOLERANCE_PCT = float(os.getenv("K1_PLUS_LEVEL_TOLERANCE", "0.5"))
 SIM_AMOUNT = int(os.getenv("K1_PLUS_SIM_AMOUNT", "500000"))
 REQUIRE_NEW_HIGH = _env_bool("K1_PLUS_REQUIRE_NEW_HIGH", True)
+# A: 매수가 대비 고정 % 손절 (피보 저점보다 먼저 닿으면 이걸로)
+STOP_LOSS_PCT = float(os.getenv("K1_PLUS_STOP_LOSS_PCT", "5.0"))
+# C: 진입가→피보 저점 거리(%)가 이 값 초과면 매수 스킵
+MAX_RISK_TO_LOW_PCT = float(os.getenv("K1_PLUS_MAX_RISK_TO_LOW_PCT", "8.0"))
 
 
 def is_enabled() -> bool:
@@ -236,6 +241,13 @@ def _k1_breached(current: float, k1: int) -> bool:
     if k1 <= 0:
         return False
     return current <= k1 * (1 + LEVEL_TOLERANCE_PCT / 100)
+
+
+def _risk_to_fib_low_pct(price: float, fib_low: int) -> float:
+    """진입(또는 현재)가 대비 피보 저점까지 하락 여유 %."""
+    if price <= 0 or fib_low <= 0:
+        return 0.0
+    return max((price - fib_low) / price * 100, 0.0)
 
 
 def _is_bullish(info_or_candle: dict, current: float | None = None) -> bool:
@@ -470,6 +482,10 @@ def check_alerts(api_budget: int | None = None) -> tuple[list[dict], list[str], 
         # ── 보유: 가정 청산 ────────────────────────────────────────────────
         if _sim_is_open(entry):
             buy_day = _trading_days_since(entry["sim"]["buy_date"]) + 1
+            buy_price = int(entry["sim"].get("buy_price") or 0)
+            profit_pct = (
+                (current - buy_price) / buy_price * 100 if buy_price > 0 else 0.0
+            )
             if buy_day >= FORCE_SELL_DAY and not _already_sent(entry, "DAY4"):
                 _mark_sent(entry, "DAY4")
                 sim = _close_sim(
@@ -481,6 +497,25 @@ def check_alerts(api_budget: int | None = None) -> tuple[list[dict], list[str], 
                     "entry": entry,
                     "current": current_i,
                     "message": f"매수 {buy_day}일차 올매도",
+                    "sim": sim,
+                })
+                continue
+            # A: 매수가 대비 고정 % 손절 (깊은 피보 저점보다 먼저 적용)
+            if (
+                STOP_LOSS_PCT > 0
+                and profit_pct <= -STOP_LOSS_PCT
+                and not _already_sent(entry, "SL_PCT")
+            ):
+                _mark_sent(entry, "SL_PCT")
+                sim = _close_sim(
+                    entry, current_i,
+                    f"매수가 −{STOP_LOSS_PCT:g}% 손절 ({profit_pct:.1f}%)",
+                )
+                alerts.append({
+                    "type": "SL",
+                    "entry": entry,
+                    "current": current_i,
+                    "message": f"매수가 −{STOP_LOSS_PCT:g}% 손절",
                     "sim": sim,
                 })
                 continue
@@ -530,6 +565,22 @@ def check_alerts(api_budget: int | None = None) -> tuple[list[dict], list[str], 
             and _is_bullish(info, current)
             and not _already_sent(entry, "BUY")
         ):
+            # C: 피보 저점까지 거리가 너무 크면 진입 스킵
+            risk_pct = _risk_to_fib_low_pct(current, fib_low)
+            if MAX_RISK_TO_LOW_PCT > 0 and risk_pct > MAX_RISK_TO_LOW_PCT:
+                if not _already_sent(entry, "SKIP_RISK"):
+                    _mark_sent(entry, "SKIP_RISK")
+                    alerts.append({
+                        "type": "SKIP",
+                        "entry": entry,
+                        "current": current_i,
+                        "message": (
+                            f"K1 훼손이나 저점까지 −{risk_pct:.1f}% "
+                            f"(한도 {MAX_RISK_TO_LOW_PCT:g}%) → 매수 스킵"
+                        ),
+                        "sim": None,
+                    })
+                continue
             _mark_sent(entry, "BUY")
             sim = _open_sim(entry, current_i)
             mode_label = "훼손 즉시" if IMMEDIATE_ON_BREACH else "종가창"
@@ -538,7 +589,8 @@ def check_alerts(api_budget: int | None = None) -> tuple[list[dict], list[str], 
                 "entry": entry,
                 "current": current_i,
                 "message": (
-                    f"K1 {k1:,} 훼손 + 당일 양봉 → {mode_label} 매수 (시뮬)"
+                    f"K1 {k1:,} 훼손 + 당일 양봉 → {mode_label} 매수 (시뮬) "
+                    f"· 저점리스크 {risk_pct:.1f}%"
                 ),
                 "sim": sim,
             })

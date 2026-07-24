@@ -81,6 +81,8 @@ PATCH = {
     "STRONG_V_MA_EXIT": "false",
     # K1+ immediate on breach
     "K1_PLUS_IMMEDIATE_ON_BREACH": "true",
+    "K1_PLUS_STOP_LOSS_PCT": "5.0",
+    "K1_PLUS_MAX_RISK_TO_LOW_PCT": "8.0",
     # 종가베팅 익일 청산 (시초가 강제매도 → 손절/익절/15:00)
     "CLOSING_STOP_LOSS_PCT": "2.0",
     "CLOSING_TAKE_PROFIT_PCT": "3.0",
