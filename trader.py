@@ -2,7 +2,8 @@
 자동매매 메인 로직 (장중매매 + 종가베팅)
 
 스케줄 (한국시간 KST):
-  09:00 - 종가베팅 포지션 시초가 매도 (전일 보유분)
+  09:00 - 종가베팅 오버나이트 동기화 (시초가 강제매도 없음)
+  09:00 ~ 15:00 - 전일 종가베팅 −2%손절 / ＋3%익절 모니터링
   09:05 - 장중매매 워치리스트 스크리닝
   09:10 ~ 14:45 - 5분마다 장중매매 진입/청산 체크
   09:10 ~ 10:30 - 5분마다 낙폭반등 체크 (ENABLE_CRASH_BOUNCE=true 시)
@@ -13,6 +14,7 @@
   14:00 - 종가베팅 스크리닝
   14:45 ~ 14:50 - AI 종가베팅 매수 1회 (K1 종가는 14:20~14:50)
   14:50 - 장중매매 잔여 포지션 강제 청산 (종가베팅 제외)
+  15:00 - 종가베팅 잔여 포지션 강제 청산
   15:10 - 장마감 손익 보고 (손익금) / 금요일 주간 총손익
 """
 import os
@@ -86,6 +88,10 @@ def _parse_hhmm_env(name: str, default_h: int, default_m: int) -> int:
 
 CLOSING_BET_ENTRY_START = _parse_hhmm_env("CLOSING_BET_ENTRY_START", 14, 45)
 CLOSING_BET_ENTRY_END = _parse_hhmm_env("CLOSING_BET_ENTRY_END", 14, 50)
+# 종가베팅 익일 청산: 시초가 강제매도 대신 손절/익절 + 장 마감 강제
+CLOSING_STOP_LOSS_PCT = float(os.getenv("CLOSING_STOP_LOSS_PCT", "2.0"))
+CLOSING_TAKE_PROFIT_PCT = float(os.getenv("CLOSING_TAKE_PROFIT_PCT", "3.0"))
+CLOSING_FORCE_EXIT_MIN = _parse_hhmm_env("CLOSING_FORCE_EXIT", 15, 0)
 
 
 def _priority_score(stock: dict, max_buy: int) -> float:
@@ -825,7 +831,7 @@ def sync_closing_positions_from_account(notify: bool = True) -> list[str]:
             f"♻️ 종가베팅 계좌 동기화 복원\n"
             f"종목: {h['name']} ({code})\n"
             f"수량: {h['quantity']}주 / 평균단가: {h['buy_price']:,}원\n"
-            f"매수일(추정): {default_buy} / 다음 09:00 매도 대상"
+            f"매수일(추정): {default_buy} / 다음 거래일 {_closing_exit_rule_label()}"
         )
         print(f"[종가동기화] {h['name']}({code}) {h['quantity']}주 @ {h['buy_price']:,}")
 
@@ -1022,7 +1028,7 @@ def recover_configured_closing_positions() -> list[str]:
             f"♻️ 종가베팅 포지션 복구\n"
             f"종목: {name} ({code})\n"
             f"수량: {quantity}주 / 평균단가: {buy_price:,}원\n"
-            f"매수일: {buy_date} / 다음 09:00 매도 대상"
+            f"매수일: {buy_date} / 다음 거래일 {_closing_exit_rule_label()}"
         )
         print(f"[종가복구] {name}({code}) {quantity}주 @ {buy_price:,}")
 
@@ -1173,8 +1179,17 @@ def _due_closing_positions() -> dict[str, dict]:
     return due
 
 
-def run_morning_sell_closing_bet() -> None:
-    """09:00 - 종가베팅 포지션 시초가 매도 (K1 종가 제외)"""
+def _closing_exit_rule_label() -> str:
+    force_h, force_m = divmod(CLOSING_FORCE_EXIT_MIN, 60)
+    return (
+        f"−{CLOSING_STOP_LOSS_PCT:g}%손절 / "
+        f"+{CLOSING_TAKE_PROFIT_PCT:g}%익절 / "
+        f"{force_h:02d}:{force_m:02d} 강제청산"
+    )
+
+
+def run_closing_bet_morning_sync() -> None:
+    """09:00 - 종가베팅 오버나이트 동기화 (시초가 강제매도 없음)."""
     if not is_trading_day():
         return
 
@@ -1192,16 +1207,82 @@ def run_morning_sell_closing_bet() -> None:
     if not due_positions:
         return
 
-    count = len(due_positions)
-    now = datetime.now(KST)
-    is_open_window = now.hour == 9 and now.minute <= 10
-    reason = "종가베팅 시초가 매도" if is_open_window else "종가베팅 지연 보충 매도"
-    print(f"\n[{now.strftime('%H:%M:%S')} KST] {reason} ({count}개)")
-    notifier.send(f"🌅 {reason} - 포지션 {count}개 매도 시작")
+    lines = [
+        f"🌙 종가베팅 오버나이트 {len(due_positions)}개 — "
+        f"시초가 강제매도 없음 ({_closing_exit_rule_label()})",
+    ]
+    for code, pos in due_positions.items():
+        lines.append(
+            f"  · {pos['name']}({code}) {pos['buy_price']:,}원 × {pos['quantity']}주"
+        )
+    notifier.send("\n".join(lines))
+    print(
+        f"[{datetime.now(KST).strftime('%H:%M:%S')} KST] "
+        f"종가베팅 모니터링 시작 {len(due_positions)}개"
+    )
 
-    for code, pos in list(due_positions.items()):
+
+def check_closing_bet_exits() -> None:
+    """전일 종가베팅: −STOP 손절 / +TP 익절 (K1 제외)."""
+    if not is_trading_day():
+        return
+
+    due = _due_closing_positions()
+    if not due:
+        return
+
+    for code, pos in list(due.items()):
+        if pos.get("name") in SELL_BLACKLIST:
+            continue
+        try:
+            current, profit_pct, _ = _sell_reference_price(code, pos["buy_price"])
+            if profit_pct <= -CLOSING_STOP_LOSS_PCT:
+                _execute_closing_sell(
+                    code, pos,
+                    f"종가베팅 손절 ({profit_pct:.1f}%, −{CLOSING_STOP_LOSS_PCT:g}%)",
+                )
+            elif profit_pct >= CLOSING_TAKE_PROFIT_PCT:
+                _execute_closing_sell(
+                    code, pos,
+                    f"종가베팅 익절 ({profit_pct:.1f}%, +{CLOSING_TAKE_PROFIT_PCT:g}%)",
+                )
+            time.sleep(0.3)
+        except Exception as e:
+            print(f"[종가베팅 청산체크] {pos.get('name', code)}: {e}")
+
+
+def run_closing_bet_force_exit() -> None:
+    """CLOSING_FORCE_EXIT - 전일 종가베팅 잔여 포지션 강제 청산."""
+    if not is_trading_day():
+        return
+
+    recover_configured_closing_positions()
+    sync_closing_positions_from_account(notify=False)
+    reconcile_positions_with_account()
+
+    due = _due_closing_positions()
+    if not due:
+        print(
+            f"[{datetime.now(KST).strftime('%H:%M:%S')} KST] "
+            "종가베팅 강제청산 대상 없음"
+        )
+        return
+
+    force_h, force_m = divmod(CLOSING_FORCE_EXIT_MIN, 60)
+    reason = f"종가베팅 {force_h:02d}:{force_m:02d} 강제청산"
+    print(
+        f"\n[{datetime.now(KST).strftime('%H:%M:%S')} KST] "
+        f"{reason} ({len(due)}개)"
+    )
+    notifier.send(f"⏰ {reason} - 포지션 {len(due)}개 매도 시작")
+    for code, pos in list(due.items()):
         _execute_closing_sell(code, pos, reason)
         time.sleep(0.5)
+
+
+def run_morning_sell_closing_bet() -> None:
+    """호환용 — 수동/API 호출 시 강제청산과 동일."""
+    run_closing_bet_force_exit()
 
 
 def run_closing_bet_screening() -> None:
@@ -1602,7 +1683,7 @@ def run_closing_report() -> None:
             lines.append("당일 청산 완료 매매 없음 (종가베팅 오버나이트 보유)\n")
             lines.append(
                 f"🌙 종가베팅 오버나이트 {len(_closing_positions)}개 보유 "
-                f"(익일 09:00 시초가 매도)"
+                f"(익일 {_closing_exit_rule_label()})"
             )
             for code, pos in _closing_positions.items():
                 invested = pos["buy_price"] * pos["quantity"]
@@ -1722,7 +1803,10 @@ def run_closing_report() -> None:
 
     # 종가베팅 미청산 포지션 (오늘 매수, 내일 매도 예정)
     if _closing_positions:
-        lines.append(f"\n🌙 종가베팅 오버나이트 {len(_closing_positions)}개 보유 (내일 09:00 시초가 매도)")
+        lines.append(
+            f"\n🌙 종가베팅 오버나이트 {len(_closing_positions)}개 보유 "
+            f"(내일 {_closing_exit_rule_label()})"
+        )
         for code, pos in _closing_positions.items():
             lines.append(f"   {pos['name']}({code}) {pos['buy_price']:,}원 {pos['quantity']}주")
 
@@ -3275,7 +3359,8 @@ def main():
             f"{cash_line}"
             "📌 장중매매: 09:05 스크리닝 → 09:10~14:30 진입 → 14:50 강제청산\n"
             f"   장중 AI: {'ON (Groq)' if ENABLE_INTRADAY_AI else 'OFF (기술조건만)'}\n"
-            "🌙 종가: 14:00 스크리닝 → 14:45 AI매수(익일09:00매도) / 금 K1종가\n"
+            "🌙 종가: 14:00 스크리닝 → 14:45 AI매수 "
+            f"(익일 {_closing_exit_rule_label()}) / 금 K1종가\n"
             f"✅ 익절 트레일링 +{TAKE_PROFIT_PCT}% / "
             f"손절 −{STOP_LOSS_PCT}% (매수 {QUICK_STOP_WINDOW_MIN}분 내 −{QUICK_STOP_LOSS_PCT}%) / "
             f"15:10 손익보고"
@@ -3300,14 +3385,15 @@ def main():
     _init_today = _init_t.strftime("%Y-%m-%d")
 
     if is_trading_day():
-        # 09:00 이후 재시작: 놓친 전일 종가베팅이 있으면 장중 보충 매도
-        if 9 * 60 <= _init_min <= 15 * 60 + 20:
-            if _due_closing_positions():
-                notifier.send("▶️ 봇 재시작 감지 - 전일 종가베팅 보충 매도")
-                _last_ran["closing_sell"] = _init_today
-                run_morning_sell_closing_bet()
-            elif _untracked_account_holdings():
-                sync_closing_positions_from_account(notify=True)
+        # 09:00 이후 재시작: 종가베팅 동기화만 (시초가 강제매도 없음)
+        if 9 * 60 <= _init_min < CLOSING_FORCE_EXIT_MIN:
+            if _due_closing_positions() or _untracked_account_holdings():
+                notifier.send(
+                    "▶️ 봇 재시작 감지 - 종가베팅 동기화 "
+                    f"({_closing_exit_rule_label()})"
+                )
+                _last_ran["closing_sync"] = _init_today
+                run_closing_bet_morning_sync()
 
         # 09:05~09:30 재시작: 장중매매 스크리닝 즉시 실행
         if 9 * 60 + 5 <= _init_min <= 9 * 60 + 30 and not _watchlist:
@@ -3324,6 +3410,7 @@ def main():
     last_closing_slot = -1    # 종가베팅 5분 슬롯
     last_screening_slot = -1  # 스크리닝 5분 재시도 슬롯
     last_strong_v_min = -1    # 강세V 시뮬 가변 주기
+    last_closing_exit_slot = -1  # 종가베팅 손절/익절 5분 슬롯
 
     while True:
         now = datetime.now(KST)
@@ -3337,6 +3424,7 @@ def main():
             last_closing_slot = -1
             last_screening_slot = -1
             last_strong_v_min = -1
+            last_closing_exit_slot = -1
         _last_ran["date"] = today
 
         # 휴장일·주말: API 서버만 유지, 매매 스케줄은 전부 스킵
@@ -3344,10 +3432,25 @@ def main():
             time.sleep(30)
             continue
 
-        # ── 09:00~15:20 KST - 전일 종가베팅 매도 (재시작 시 보충 포함) ──────
-        if 9 * 60 <= t <= 15 * 60 + 20 and _last_ran.get("closing_sell") != today:
-            _last_ran["closing_sell"] = today
-            run_morning_sell_closing_bet()
+        # ── 09:00 - 종가베팅 오버나이트 동기화 (시초가 강제매도 없음) ───────
+        if 9 * 60 <= t <= 9 * 60 + 10 and _last_ran.get("closing_sync") != today:
+            _last_ran["closing_sync"] = today
+            run_closing_bet_morning_sync()
+
+        # ── 09:00~15:00 직전 - 전일 종가베팅 손절/익절 (5분마다) ────────────
+        if 9 * 60 <= t < CLOSING_FORCE_EXIT_MIN and _due_closing_positions():
+            slot = t // 5
+            if slot != last_closing_exit_slot:
+                last_closing_exit_slot = slot
+                check_closing_bet_exits()
+
+        # ── 15:00~15:10 - 종가베팅 잔여 강제 청산 ───────────────────────────
+        if (
+            CLOSING_FORCE_EXIT_MIN <= t <= CLOSING_FORCE_EXIT_MIN + 10
+            and _last_ran.get("closing_force_exit") != today
+        ):
+            _last_ran["closing_force_exit"] = today
+            run_closing_bet_force_exit()
 
         # ── 09:05~09:30 KST - 장중매매 워치리스트 스크리닝 (실패 시 5분마다 재시도) ──
         if 9 * 60 + 5 <= t <= 9 * 60 + 30 and _last_ran.get("screening_ok") != today:

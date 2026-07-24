@@ -125,7 +125,7 @@ def do_screening():
 
 @flask_app.route("/closing-sell", methods=["POST"])
 def do_closing_sell():
-    """종가베팅 익일 매도 수동 실행 (복구 후 즉시 매도용)"""
+    """종가베팅 전일분 강제청산 (수동)"""
     _check_auth()
     import trader
     from datetime import datetime
@@ -139,11 +139,11 @@ def do_closing_sell():
         return jsonify({
             "ok": False,
             "message": f"장 운영 시간이 아닙니다 (현재 KST {now.strftime('%H:%M')})\n"
-                       "종가베팅 매도는 09:00~15:20 사이에 사용하세요.",
+                       "종가베팅 강제청산은 09:00~15:20 사이에 사용하세요.",
         })
-    th = threading.Thread(target=trader.run_morning_sell_closing_bet, daemon=True)
+    th = threading.Thread(target=trader.run_closing_bet_force_exit, daemon=True)
     th.start()
-    return jsonify({"ok": True, "message": "종가베팅 익일 매도 시작됨"})
+    return jsonify({"ok": True, "message": "종가베팅 강제청산 시작됨"})
 
 
 @flask_app.route("/close-all", methods=["POST"])
