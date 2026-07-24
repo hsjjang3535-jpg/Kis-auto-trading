@@ -42,6 +42,7 @@ SECRET_KEYS = {
 PATCH = {
     # recovery / ops
     "TZ": "Asia/Seoul",
+    "DATA_DIR": "/data",
     "CLOSING_ACCOUNT_SYNC": "true",
     "MAX_BUY_CASH_FAILS": "3",
     # exits

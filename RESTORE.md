@@ -23,6 +23,20 @@ python scripts/sync_railway_vars.py
 
 ---
 
+## 0. Railway Volume (주간손익·포지션 유지) — 필수 권장
+
+재배포 시 컨테이너 디스크가 초기화되어 `trading_state.json` / 손익 장부가 사라집니다.  
+주간 손익이 “기록 없음”으로 나오는 주된 원인입니다.
+
+1. Railway → **Kis-auto-trading** → **Volumes** → **Add Volume**
+2. Mount path: `/data`
+3. Variables에 `DATA_DIR=/data` 추가
+4. Redeploy
+
+이후 상태는 `/data/trading_state.json`, 손익은 `/data/daily_pnl_ledger.json`에 남습니다.
+
+---
+
 ## 1. 코드 복원
 
 ```bash

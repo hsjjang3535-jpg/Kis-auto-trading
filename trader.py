@@ -75,7 +75,11 @@ _STRENGTH_SCORE = {"강": 40, "중": 28, "약": 15, "없음": 0, "-": 10}
 # 장중 전략 우선순위 (상단 > 돌파 > 하단 — 스크리너와 동일)
 _STRATEGY_SCORE = {"상단매매": 20, "돌파매매": 12, "하단매매": 5}
 
-_STATE_FILE = "trading_state.json"
+# Railway 재배포 시 유실 방지: Volume 마운트 경로를 DATA_DIR로 지정 (예: /data)
+DATA_DIR = os.getenv("DATA_DIR", ".").strip() or "."
+os.makedirs(DATA_DIR, exist_ok=True)
+_STATE_FILE = os.path.join(DATA_DIR, "trading_state.json")
+_PNL_LEDGER_FILE = os.path.join(DATA_DIR, "daily_pnl_ledger.json")
 
 
 def _parse_hhmm_env(name: str, default_h: int, default_m: int) -> int:
@@ -392,6 +396,42 @@ def _mark_sold_today(code: str) -> None:
         _sold_codes_today.add(code)
 
 
+def _load_pnl_ledger_file() -> list[dict]:
+    """재배포에도 살아남도록 손익 장부를 별도 파일에서 로드."""
+    if not os.path.exists(_PNL_LEDGER_FILE):
+        return []
+    try:
+        with open(_PNL_LEDGER_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, list):
+            return []
+        return [
+            e for e in data
+            if isinstance(e, dict) and e.get("date") and "profit_won" in e
+        ]
+    except Exception as e:
+        print(f"[손익장부 로드 오류] {e}")
+        return []
+
+
+def _save_pnl_ledger_file() -> None:
+    try:
+        with open(_PNL_LEDGER_FILE, "w", encoding="utf-8") as f:
+            json.dump(_daily_pnl_ledger, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[손익장부 저장 오류] {e}")
+
+
+def _merge_pnl_ledgers(*ledgers: list[dict]) -> list[dict]:
+    """날짜별 최신 항목으로 병합 (뒤에 온 쪽이 우선)."""
+    by_date: dict[str, dict] = {}
+    for ledger in ledgers:
+        for e in ledger or []:
+            if isinstance(e, dict) and e.get("date") and "profit_won" in e:
+                by_date[str(e["date"])] = e
+    return sorted(by_date.values(), key=lambda x: x["date"])[-40:]
+
+
 def _save_state() -> None:
     state = {
         "kis_mode": os.getenv("KIS_MODE", "모의"),
@@ -425,6 +465,7 @@ def _save_state() -> None:
     try:
         with open(_STATE_FILE, "w", encoding="utf-8") as f:
             json.dump(state, f, ensure_ascii=False, indent=2)
+        _save_pnl_ledger_file()
     except Exception as e:
         print(f"[상태 저장 오류] {e}")
 
@@ -448,6 +489,11 @@ def _load_state() -> None:
                 f"[상태 초기화] KIS_MODE 변경 ({saved_mode} → {current_mode}) — "
                 "모의/실전 포지션 상태를 불러오지 않습니다"
             )
+            # 손익 장부 파일은 모드와 무관하게 유지
+            from_file = _load_pnl_ledger_file()
+            if from_file:
+                _daily_pnl_ledger = _merge_pnl_ledgers(from_file)
+                print(f"[상태 복원] 일별 손익 장부 {len(_daily_pnl_ledger)}일 (파일)")
             return
 
         # 손익 장부는 모드 전환과 무관하게 유지하지 않음(실전/모의 혼동 방지)
@@ -525,13 +571,17 @@ def _load_state() -> None:
                 )
 
         ledger = state.get("daily_pnl_ledger", [])
+        from_state: list[dict] = []
         if isinstance(ledger, list):
-            _daily_pnl_ledger = [
+            from_state = [
                 e for e in ledger
                 if isinstance(e, dict) and e.get("date") and "profit_won" in e
             ]
-            if _daily_pnl_ledger:
-                print(f"[상태 복원] 일별 손익 장부 {len(_daily_pnl_ledger)}일 불러옴")
+        from_file = _load_pnl_ledger_file()
+        _daily_pnl_ledger = _merge_pnl_ledgers(from_state, from_file)
+        if _daily_pnl_ledger:
+            print(f"[상태 복원] 일별 손익 장부 {len(_daily_pnl_ledger)}일 불러옴")
+            _save_pnl_ledger_file()
 
         # 장중 포지션은 오늘 날짜인 경우만
         if state.get("date") == _today_kst():
@@ -677,9 +727,11 @@ def run_weekly_pnl_report() -> None:
     lines.append("━━ 🧪 시뮬 ━━")
     sim_total = 0
     sim_trades = 0
+    missing = 0
     for d in week_dates:
         row = by_date.get(d)
         if row is None:
+            missing += 1
             lines.append(f"  {d}: 기록 없음")
             continue
         sim_total += int(row.get("sim_profit_won", 0))
@@ -690,6 +742,11 @@ def run_weekly_pnl_report() -> None:
         )
     lines.append(f"🧪 <b>이번 주 시뮬 총 손익금: {_format_won(sim_total)}</b>")
     lines.append(f"시뮬 매매: {sim_trades}건")
+    if missing:
+        lines.append(
+            f"\n⚠️ {missing}일은 기록 없음 — 재배포로 장부 유실 "
+            f"또는 당일 15:10 보고 미실행 가능"
+        )
     notifier.send("\n".join(lines))
     print(f"[주간손익] 실전 {live_total:,}원 / 시뮬 {sim_total:,}원")
 
@@ -3259,6 +3316,15 @@ def _reset_daily_state() -> None:
 
 def main():
     print("=== KIS 자동매매 시작 (종산 장중매매) ===")
+    print(f"[저장경로] DATA_DIR={os.path.abspath(DATA_DIR)}")
+    print(f"[저장경로] state={_STATE_FILE}")
+    print(f"[저장경로] pnl_ledger={_PNL_LEDGER_FILE}")
+    if os.path.abspath(DATA_DIR) == os.path.abspath("."):
+        print(
+            "[저장경로] ⚠️ DATA_DIR 미설정 — Railway 재배포 시 "
+            "손익장부·포지션 상태가 초기화될 수 있습니다. "
+            "Volume을 /data에 붙이고 DATA_DIR=/data 를 권장합니다."
+        )
     _load_state()
 
     acc_ok, acc_msg, orderable_cash = kis_api.verify_trade_account()
