@@ -68,6 +68,8 @@ TAKE_PROFIT_PCT = float(os.getenv("STRONG_V_TAKE_PROFIT", "3.0"))
 TRAILING_STOP_PCT = float(os.getenv("STRONG_V_TRAILING_STOP", "1.0"))
 STOP_LOSS_PCT = float(os.getenv("STRONG_V_STOP_LOSS", "2.0"))
 MA_TOLERANCE_PCT = float(os.getenv("STRONG_V_MA_TOLERANCE", "0.5"))
+# 5분봉 MA 저항 익절 (false=끄고 트레일링·시간청산만)
+MA_EXIT_ENABLED = os.getenv("STRONG_V_MA_EXIT", "false").lower() == "true"
 SCAN_START_MIN = _parse_hhmm(os.getenv("STRONG_V_SCAN_START", "09:00"), 9, 0)
 FAST_SCAN_END_MIN = _parse_hhmm(os.getenv("STRONG_V_FAST_SCAN_END", "10:00"), 10, 0)
 POLL_INTERVAL_MIN = int(os.getenv("STRONG_V_POLL_INTERVAL", "5"))
@@ -518,12 +520,13 @@ def _evaluate_exit(
             f"에서 -{drop_from_peak:.1f}%)"
         )
 
-    ma60 = pos.get("exit_ma60") or (intra or {}).get("ma60", 0)
-    if ma60 > 0 and current >= ma60 * (1 - MA_TOLERANCE_PCT / 100):
-        if profit_pct > 0:
-            return True, (
-                f"5분봉 MA{pos.get('ma_period', 60)} 저항 익절 (+{profit_pct:.1f}%)"
-            )
+    if MA_EXIT_ENABLED:
+        ma60 = pos.get("exit_ma60") or (intra or {}).get("ma60", 0)
+        if ma60 > 0 and current >= ma60 * (1 - MA_TOLERANCE_PCT / 100):
+            if profit_pct > 0:
+                return True, (
+                    f"5분봉 MA{pos.get('ma_period', 60)} 저항 익절 (+{profit_pct:.1f}%)"
+                )
 
     if now_min >= TIME_EXIT_MIN and profit_pct > 0:
         hh, mm = TIME_EXIT_MIN // 60, TIME_EXIT_MIN % 60

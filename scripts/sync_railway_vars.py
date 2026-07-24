@@ -78,6 +78,7 @@ PATCH = {
     "STRONG_V_TIME_EXIT": "14:20",
     "STRONG_V_TAKE_PROFIT": "3.0",
     "STRONG_V_STOP_LOSS": "2.0",
+    "STRONG_V_MA_EXIT": "false",
     # K1+ immediate on breach
     "K1_PLUS_IMMEDIATE_ON_BREACH": "true",
     # 종가베팅 익일 청산 (시초가 강제매도 → 손절/익절/15:00)
