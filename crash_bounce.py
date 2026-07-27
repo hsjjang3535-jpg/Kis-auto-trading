@@ -65,6 +65,9 @@ def is_enabled() -> bool:
     # 모의투자: API 초당 2건 → V자반등과 중복 스캔 방지
     if os.getenv("KIS_MODE", "모의") == "모의":
         return False
+    # 시뮬 ON이면 실전 낙폭반등 매수 중단 (Railway에 ENABLE_CRASH_BOUNCE=true만 남아 있어도 안전)
+    if _env_bool("ENABLE_CRASH_BOUNCE_SIM", False):
+        return False
     return ENABLED
 
 

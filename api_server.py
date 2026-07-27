@@ -20,6 +20,7 @@ def _check_auth():
 def health():
     import kis_api
     import crash_bounce
+    import crash_bounce_sim
     import v_reversal
     import ul_rebound
     import k1_closing
@@ -44,6 +45,7 @@ def health():
         "strategies": {
             "intraday_ai": os.getenv("ENABLE_INTRADAY_AI", "false").lower() == "true",
             "crash_bounce": crash_bounce.is_enabled(),
+            "crash_bounce_sim": crash_bounce_sim.is_enabled(),
             "v_reversal": v_reversal.is_enabled(),
             "ul_rebound": ul_rebound.is_enabled(),
             "k1_closing": k1_closing.is_enabled(),
