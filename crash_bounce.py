@@ -48,6 +48,7 @@ AFTERNOON_TIME_EXIT_MIN = _parse_hhmm(
     os.getenv("CRASH_BOUNCE_AFTERNOON_TIME_EXIT", "14:20"), 14, 20,
 )
 MIN_DROP_PCT = float(os.getenv("CRASH_BOUNCE_MIN_DROP", "3.5"))
+MAX_DROP_PCT = float(os.getenv("CRASH_BOUNCE_MAX_DROP", "7.0"))
 MAX_AMOUNT = int(os.getenv("MAX_CRASH_BOUNCE_AMOUNT", "500000"))
 MAX_BUY = int(os.getenv("MAX_CRASH_BOUNCE_BUY", "500000"))
 MAX_POSITIONS = int(os.getenv("CRASH_BOUNCE_MAX_POSITIONS", "1"))
@@ -185,7 +186,7 @@ def scan_candidates(
             continue
 
         drop = _drop_from_open(info)
-        if drop < MIN_DROP_PCT:
+        if drop < MIN_DROP_PCT or drop > MAX_DROP_PCT:
             continue
 
         try:

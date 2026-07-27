@@ -32,6 +32,7 @@ import screener
 import ai_analyzer
 import notifier
 import crash_bounce
+import crash_bounce_sim
 import v_reversal
 import ul_rebound
 import k1_closing
@@ -460,6 +461,9 @@ def _save_state() -> None:
         "strong_v_sim_open": strong_v_sim.dump_open_position(),
         "strong_v_sim_focus": strong_v_sim.dump_focus_target(),
         "strong_v_sim_trades_today": strong_v_sim.dump_sim_trades_today(),
+        "crash_bounce_sim_open": crash_bounce_sim.dump_open_position(),
+        "crash_bounce_sim_trades_today": crash_bounce_sim.dump_sim_trades_today(),
+        "crash_bounce_sim_invested_today": crash_bounce_sim.dump_sim_invested_today(),
         "daily_pnl_ledger": _daily_pnl_ledger,
     }
     try:
@@ -569,6 +573,24 @@ def _load_state() -> None:
                     f"[상태 복원] 강세V 시뮬 후보 추적 "
                     f"{ft['name']}({ft['code']}) 불러옴"
                 )
+            crash_bounce_sim.load_open_position(state.get("crash_bounce_sim_open"))
+            crash_bounce_sim.load_sim_trades_today(
+                state.get("crash_bounce_sim_trades_today", []),
+            )
+            crash_bounce_sim.load_sim_invested_today(
+                state.get("crash_bounce_sim_invested_today", 0),
+            )
+            if crash_bounce_sim.get_open_position():
+                pos = crash_bounce_sim.get_open_position()
+                print(
+                    f"[상태 복원] 낙폭반등 시뮬 보유 "
+                    f"{pos['name']}({pos['code']}) 불러옴"
+                )
+            elif crash_bounce_sim.get_sim_trades_today():
+                print(
+                    f"[상태 복원] 낙폭반등 시뮬 체결 "
+                    f"{len(crash_bounce_sim.get_sim_trades_today())}건 불러옴"
+                )
 
         ledger = state.get("daily_pnl_ledger", [])
         from_state: list[dict] = []
@@ -638,6 +660,7 @@ def _collect_sim_pnl_today() -> tuple[int, int, list[tuple[str, int, int]]]:
         ("K2플러스", k2_plus.get_sim_trades_today()),
         ("K2", k2_intraday.get_sim_trades_today()),
         ("강세V", strong_v_sim.get_sim_trades_today()),
+        ("낙폭반등", crash_bounce_sim.get_sim_trades_today()),
     ]
     details: list[tuple[str, int, int]] = []
     total_won = 0
@@ -1574,7 +1597,7 @@ def run_market_check() -> None:
     if is_exit_time():
         _check_exit()
 
-    if crash_bounce.is_entry_window():
+    if crash_bounce.is_enabled() and not crash_bounce_sim.is_enabled():
         _check_crash_bounce_entry()
 
     if v_reversal.is_entry_window():
@@ -1710,6 +1733,13 @@ def run_status_report() -> None:
                 f"오늘 {len(strong_v_sim.get_sim_trades_today())}건 / "
                 f"주기 {strong_v_sim.get_poll_interval_min()}분"
             )
+        if crash_bounce_sim.is_enabled():
+            open_cb = 1 if crash_bounce_sim.get_open_position() else 0
+            lines.append(
+                f"낙폭반등 [시뮬]: 보유 {open_cb} / "
+                f"오늘 {len(crash_bounce_sim.get_sim_trades_today())}건 / "
+                f"주기 {crash_bounce_sim.get_poll_interval_min()}분"
+            )
         if pos_lines:
             lines.append("📌 장중 보유 종목:")
             lines.extend(pos_lines)
@@ -1783,6 +1813,10 @@ def run_closing_report() -> None:
         sv_lines = strong_v_sim.format_summary()
         if sv_lines:
             lines.extend(sv_lines)
+            lines.append("")
+        cb_sim_lines = crash_bounce_sim.format_summary()
+        if cb_sim_lines:
+            lines.extend(cb_sim_lines)
             lines.append("")
         if not _watchlist:
             summary = _last_morning_summary
@@ -1913,6 +1947,11 @@ def run_closing_report() -> None:
     if sv_lines:
         lines.append("")
         lines.extend(sv_lines)
+
+    cb_sim_lines = crash_bounce_sim.format_summary()
+    if cb_sim_lines:
+        lines.append("")
+        lines.extend(cb_sim_lines)
 
     notifier.send("\n".join(lines))
     if datetime.now(KST).weekday() == 4:
@@ -2348,6 +2387,32 @@ def _check_v_reversal_entry(afternoon: bool = False) -> None:
             _notify_buy_error_once(code, name, e, "V자반등 진입 오류")
 
 
+def _check_crash_bounce_sim() -> None:
+    """낙폭반등 시뮬 — 실제 주문 없음"""
+    if not crash_bounce_sim.is_enabled() or not crash_bounce_sim.is_monitor_window():
+        return
+    try:
+        events, api_used = crash_bounce_sim.run_check()
+        if events:
+            for ev in events:
+                if ev.get("action") == "buy":
+                    notifier.notify_crash_bounce_sim_buy(
+                        ev["name"], ev["code"], ev["quantity"], ev["price"], ev["reason"],
+                    )
+                else:
+                    notifier.notify_crash_bounce_sim_sell(
+                        ev["name"], ev["code"], ev["quantity"],
+                        ev["buy_price"], ev["sell_price"],
+                        ev["profit_pct"], ev["profit_won"],
+                        ev["sell_reason"],
+                    )
+            _save_state()
+            print(f"[낙폭반등시뮬] 이벤트 {len(events)}건 (API {api_used}회)")
+    except Exception as e:
+        print(f"[낙폭반등시뮬] 구간 체크 오류: {e}")
+        notifier.notify_error(f"낙폭반등 시뮬 체크 오류: {e}")
+
+
 def _check_strong_v_sim() -> None:
     """5분마다 — 강세주 급락 V 시뮬 진입·청산"""
     if not strong_v_sim.is_enabled() or not strong_v_sim.is_monitor_window():
@@ -2383,10 +2448,17 @@ def run_afternoon_rebound_scan() -> None:
     eligible: list[str] = []
     if (
         crash_bounce.is_enabled()
+        and not crash_bounce_sim.is_enabled()
         and _crash_bounce_invested_today == 0
         and _crash_bounce_position_count() == 0
     ):
         eligible.append(crash_bounce.STRATEGY)
+    if (
+        crash_bounce_sim.is_enabled()
+        and crash_bounce_sim.get_sim_invested_today() == 0
+        and not crash_bounce_sim.get_open_position()
+    ):
+        eligible.append(crash_bounce_sim.STRATEGY)
     if (
         v_reversal.is_enabled()
         and _v_reversal_invested_today == 0
@@ -2411,6 +2483,20 @@ def run_afternoon_rebound_scan() -> None:
         results.append(
             f"낙폭반등: {'매수 체결' if _crash_bounce_invested_today > before else '조건 종목 없음'}"
         )
+
+    if crash_bounce_sim.STRATEGY in eligible:
+        events, _ = crash_bounce_sim.run_afternoon_entry()
+        for ev in events:
+            if ev.get("action") == "buy":
+                notifier.notify_crash_bounce_sim_buy(
+                    ev["name"], ev["code"], ev["quantity"], ev["price"], ev["reason"],
+                )
+        results.append(
+            f"낙폭반등[시뮬]: "
+            f"{'가상매수' if events else '조건 종목 없음'}"
+        )
+        if events:
+            _save_state()
 
     if v_reversal.STRATEGY in eligible:
         before = _v_reversal_invested_today
@@ -3308,6 +3394,7 @@ def _reset_daily_state() -> None:
     k1_plus.reset_daily_sim_trades()
     k2_plus.reset_daily_sim_trades()
     strong_v_sim.reset_daily_sim_trades()
+    crash_bounce_sim.reset_daily_sim_trades()
     _save_state()
     print(f"[일별 초기화] {_today_kst()} 새 거래일 시작")
 
@@ -3345,11 +3432,20 @@ def main():
     now_kst = datetime.now(KST).strftime("%Y-%m-%d %H:%M KST")
     closing_pos_note = f"\n🌙 종가베팅 오버나이트 {len(_closing_positions)}개 보유 중" if _closing_positions else ""
     crash_note = ""
-    if crash_bounce.is_enabled():
+    if crash_bounce.is_enabled() and not crash_bounce_sim.is_enabled():
         crash_note = (
             f"\n🔶 낙폭반등: {os.getenv('CRASH_BOUNCE_ENTRY_START', '09:10')}~"
             f"{os.getenv('CRASH_BOUNCE_ENTRY_END', '10:30')} / "
             f"한도 {crash_bounce.MAX_AMOUNT:,}원 / 오전 미체결 시 13:15 재검색"
+        )
+    cb_sim_note = ""
+    if crash_bounce_sim.is_enabled():
+        cb_sim_note = (
+            f"\n🔶 낙폭반등: [시뮬만] 시가 −{crash_bounce.MIN_DROP_PCT}~"
+            f"{crash_bounce.MAX_DROP_PCT}% / "
+            f"{os.getenv('CRASH_BOUNCE_ENTRY_START', '09:10')}~"
+            f"{os.getenv('CRASH_BOUNCE_ENTRY_END', '10:30')} / "
+            f"한도 {crash_bounce.MAX_AMOUNT:,}원"
         )
     v_note = ""
     if v_reversal.is_enabled():
@@ -3431,6 +3527,7 @@ def main():
             f"손절 −{STOP_LOSS_PCT}% (매수 {QUICK_STOP_WINDOW_MIN}분 내 −{QUICK_STOP_LOSS_PCT}%) / "
             f"15:10 손익보고"
             f"{crash_note}"
+            f"{cb_sim_note}"
             f"{v_note}"
             f"{ul_note}"
             f"{k1_note}"
@@ -3476,6 +3573,7 @@ def main():
     last_closing_slot = -1    # 종가베팅 5분 슬롯
     last_screening_slot = -1  # 스크리닝 5분 재시도 슬롯
     last_strong_v_min = -1    # 강세V 시뮬 가변 주기
+    last_crash_bounce_sim_min = -1
     last_closing_exit_slot = -1  # 종가베팅 손절/익절 5분 슬롯
 
     while True:
@@ -3490,6 +3588,7 @@ def main():
             last_closing_slot = -1
             last_screening_slot = -1
             last_strong_v_min = -1
+            last_crash_bounce_sim_min = -1
             last_closing_exit_slot = -1
         _last_ran["date"] = today
 
@@ -3548,6 +3647,20 @@ def main():
             if last_strong_v_min < 0 or t - last_strong_v_min >= interval:
                 last_strong_v_min = t
                 _check_strong_v_sim()
+
+        # ── 09:10~14:20 KST - 낙폭반등 시뮬 (5분 / 보유 1분) ─────────────────
+        if (
+            crash_bounce_sim.is_enabled()
+            and crash_bounce_sim.is_monitor_window()
+            and 9 * 60 + 10 <= t <= 14 * 60 + 20
+        ):
+            interval = crash_bounce_sim.get_poll_interval_min()
+            if (
+                last_crash_bounce_sim_min < 0
+                or t - last_crash_bounce_sim_min >= interval
+            ):
+                last_crash_bounce_sim_min = t
+                _check_crash_bounce_sim()
 
         # ── 11:00~11:10 KST - 보충 스크리닝 (오전 워치리스트 0개) ─────────────
         if 11 * 60 <= t <= 11 * 60 + 10 and _last_ran.get("supplementary_screening") != today:

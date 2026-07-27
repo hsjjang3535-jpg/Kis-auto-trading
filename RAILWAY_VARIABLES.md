@@ -139,6 +139,7 @@ CLOSING_RECOVERY_POSITIONS=042700|한미반도체|2026-07-15|2026-07-16,004310|�
 | `CRASH_BOUNCE_AFTERNOON_TIME_EXIT` | `14:20` | 13:15 재검색 체결분 시간 청산 |
 | `CRASH_BOUNCE_AFTERNOON_VOLUME_RATIO` | `1.2` | 오후 최근 5분봉 거래량 증가 배수 |
 | `CRASH_BOUNCE_MIN_DROP` | `3.5` | 시가 대비 -3.5%↑ |
+| `CRASH_BOUNCE_MAX_DROP` | `7.0` | 시가 대비 -7% 초과 급락 스킵 |
 | `MAX_CRASH_BOUNCE_AMOUNT` | `500000` | 총 한도 |
 | `MAX_CRASH_BOUNCE_BUY` | `500000` | 1회 매수 |
 | `CRASH_BOUNCE_MAX_POSITIONS` | `1` | 동시 보유 |
@@ -148,6 +149,18 @@ CLOSING_RECOVERY_POSITIONS=042700|한미반도체|2026-07-15|2026-07-16,004310|�
 
 오전 미체결 시에만 13:15에 최근 30분 새 저점 반등·거래량 증가 조건으로
 한 번 더 검색합니다. 매수 한도는 오전과 동일합니다.
+
+### 낙폭반등 시뮬 (실전 중단 + 테스트)
+
+| Variable | 권장 | 설명 |
+|----------|------|------|
+| `ENABLE_CRASH_BOUNCE` | `false` | 실전 낙폭반등 매수 OFF |
+| `ENABLE_CRASH_BOUNCE_SIM` | `true` | 시뮬 ON (텔레그램만, 주문 없음) |
+| `CRASH_BOUNCE_SIM_AMOUNT` | `500000` | 가상 1회 매수 금액 |
+| `CRASH_BOUNCE_SIM_POLL_INTERVAL` | `5` | 스캔 주기(분) |
+| `CRASH_BOUNCE_SIM_POSITION_POLL` | `1` | 보유 시 청산 체크(분) |
+
+실전 복귀: `ENABLE_CRASH_BOUNCE=true`, `ENABLE_CRASH_BOUNCE_SIM=false`
 
 ### V자반등 오후 재검색
 

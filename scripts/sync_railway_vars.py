@@ -88,6 +88,11 @@ PATCH = {
     "CLOSING_STOP_LOSS_PCT": "2.0",
     "CLOSING_TAKE_PROFIT_PCT": "3.0",
     "CLOSING_FORCE_EXIT": "15:00",
+    # 낙폭반등: 실전 OFF + 시뮬 + 낙폭 상한
+    "ENABLE_CRASH_BOUNCE": "false",
+    "ENABLE_CRASH_BOUNCE_SIM": "true",
+    "CRASH_BOUNCE_MAX_DROP": "7.0",
+    "CRASH_BOUNCE_SIM_AMOUNT": "500000",
 }
 
 
