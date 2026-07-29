@@ -33,6 +33,7 @@ import ai_analyzer
 import notifier
 import crash_bounce
 import crash_bounce_sim
+import samsung_005930_sim
 import v_reversal
 import ul_rebound
 import k1_closing
@@ -464,6 +465,8 @@ def _save_state() -> None:
         "crash_bounce_sim_open": crash_bounce_sim.dump_open_position(),
         "crash_bounce_sim_trades_today": crash_bounce_sim.dump_sim_trades_today(),
         "crash_bounce_sim_invested_today": crash_bounce_sim.dump_sim_invested_today(),
+        "samsung_sim_open": samsung_005930_sim.dump_open_position(),
+        "samsung_sim_trades_today": samsung_005930_sim.dump_sim_trades_today(),
         "daily_pnl_ledger": _daily_pnl_ledger,
     }
     try:
@@ -590,6 +593,21 @@ def _load_state() -> None:
                 print(
                     f"[상태 복원] 낙폭반등 시뮬 체결 "
                     f"{len(crash_bounce_sim.get_sim_trades_today())}건 불러옴"
+                )
+            samsung_005930_sim.load_open_position(state.get("samsung_sim_open"))
+            samsung_005930_sim.load_sim_trades_today(
+                state.get("samsung_sim_trades_today", []),
+            )
+            if samsung_005930_sim.get_open_position():
+                pos = samsung_005930_sim.get_open_position()
+                print(
+                    f"[상태 복원] 삼성전용 시뮬 보유 "
+                    f"{pos['name']}({pos['code']}) 불러옴"
+                )
+            elif samsung_005930_sim.get_sim_trades_today():
+                print(
+                    f"[상태 복원] 삼성전용 시뮬 체결 "
+                    f"{len(samsung_005930_sim.get_sim_trades_today())}건 불러옴"
                 )
 
         ledger = state.get("daily_pnl_ledger", [])
@@ -740,6 +758,7 @@ def _collect_sim_pnl_today() -> tuple[int, int, list[tuple[str, int, int]]]:
         ("K2", k2_intraday.get_sim_trades_today()),
         ("강세V", strong_v_sim.get_sim_trades_today()),
         ("낙폭반등", crash_bounce_sim.get_sim_trades_today()),
+        ("삼성전용", samsung_005930_sim.get_sim_trades_today()),
     ]
     details: list[tuple[str, int, int]] = []
     total_won = 0
@@ -1819,6 +1838,13 @@ def run_status_report() -> None:
                 f"오늘 {len(crash_bounce_sim.get_sim_trades_today())}건 / "
                 f"주기 {crash_bounce_sim.get_poll_interval_min()}분"
             )
+        if samsung_005930_sim.is_enabled():
+            open_ss = 1 if samsung_005930_sim.get_open_position() else 0
+            lines.append(
+                f"삼성전용 [시뮬]: 보유 {open_ss} / "
+                f"오늘 {len(samsung_005930_sim.get_sim_trades_today())}건 / "
+                f"주기 {samsung_005930_sim.get_poll_interval_min()}분"
+            )
         if pos_lines:
             lines.append("📌 장중 보유 종목:")
             lines.extend(pos_lines)
@@ -1896,6 +1922,10 @@ def run_closing_report() -> None:
         cb_sim_lines = crash_bounce_sim.format_summary()
         if cb_sim_lines:
             lines.extend(cb_sim_lines)
+            lines.append("")
+        samsung_lines = samsung_005930_sim.format_summary()
+        if samsung_lines:
+            lines.extend(samsung_lines)
             lines.append("")
         if not _watchlist:
             summary = _last_morning_summary
@@ -2031,6 +2061,11 @@ def run_closing_report() -> None:
     if cb_sim_lines:
         lines.append("")
         lines.extend(cb_sim_lines)
+
+    samsung_lines = samsung_005930_sim.format_summary()
+    if samsung_lines:
+        lines.append("")
+        lines.extend(samsung_lines)
 
     notifier.send("\n".join(lines))
     if datetime.now(KST).weekday() == 4:
@@ -2516,6 +2551,32 @@ def _check_crash_bounce_sim() -> None:
     except Exception as e:
         print(f"[낙폭반등시뮬] 구간 체크 오류: {e}")
         notifier.notify_error(f"낙폭반등 시뮬 체크 오류: {e}")
+
+
+def _check_samsung_sim() -> None:
+    """삼성전자 전용 시뮬 진입·청산"""
+    if not samsung_005930_sim.is_enabled() or not samsung_005930_sim.is_monitor_window():
+        return
+    try:
+        events, api_used = samsung_005930_sim.run_check()
+        if events:
+            for ev in events:
+                if ev.get("action") == "buy":
+                    notifier.notify_samsung_sim_buy(
+                        ev["name"], ev["code"], ev["quantity"], ev["price"], ev["reason"],
+                    )
+                elif ev.get("action") == "sell":
+                    notifier.notify_samsung_sim_sell(
+                        ev["name"], ev["code"], ev["quantity"],
+                        ev["buy_price"], ev["sell_price"],
+                        ev["profit_pct"], ev["profit_won"],
+                        ev["sell_reason"],
+                    )
+            _save_state()
+            print(f"[삼성시뮬] 이벤트 {len(events)}건 (API {api_used}회)")
+    except Exception as e:
+        print(f"[삼성시뮬] 구간 체크 오류: {e}")
+        notifier.notify_error(f"삼성전용 시뮬 체크 오류: {e}")
 
 
 def _check_strong_v_sim() -> None:
@@ -3524,6 +3585,7 @@ def _reset_daily_state() -> None:
     k2_plus.reset_daily_sim_trades()
     strong_v_sim.reset_daily_sim_trades()
     crash_bounce_sim.reset_daily_sim_trades()
+    samsung_005930_sim.reset_daily_sim_trades()
     _save_state()
     print(f"[일별 초기화] {_today_kst()} 새 거래일 시작")
 
@@ -3622,6 +3684,15 @@ def main():
             f"5분(09~10시 2분·후보/보유 1분) / "
             f"전일종가 -{strong_v_sim.MAX_BELOW_PREV_PCT}% · MA5 ±{strong_v_sim.MA5_BELOW_TOLERANCE_PCT}%"
         )
+    samsung_note = ""
+    if samsung_005930_sim.is_enabled():
+        samsung_note = (
+            f"\n🟦 삼성전용: [시뮬만] / "
+            f"{os.getenv('SAMSUNG_SIM_ENTRY_START', '09:10')}~"
+            f"{os.getenv('SAMSUNG_SIM_ENTRY_END', '14:20')} / "
+            f"시가 -{samsung_005930_sim.MIN_DROP_PCT}~"
+            f"{samsung_005930_sim.MAX_DROP_PCT}% · 60일선 근처 눌림 + 5분봉 반등"
+        )
     k1_pos_note = ""
     if _k1_closing_positions:
         k1_pos_note = f"\n🔷 K1 종가 보유 {len(_k1_closing_positions)}개 (4일 보유)"
@@ -3664,6 +3735,7 @@ def main():
             f"{plus_note}"
             f"{k2p_note}"
             f"{sv_note}"
+            f"{samsung_note}"
             f"{closing_pos_note}"
             f"{k1_pos_note}"
         )
@@ -3703,6 +3775,7 @@ def main():
     last_screening_slot = -1  # 스크리닝 5분 재시도 슬롯
     last_strong_v_min = -1    # 강세V 시뮬 가변 주기
     last_crash_bounce_sim_min = -1
+    last_samsung_sim_min = -1
     last_closing_exit_slot = -1  # 종가베팅 손절/익절 5분 슬롯
 
     while True:
@@ -3718,6 +3791,7 @@ def main():
             last_screening_slot = -1
             last_strong_v_min = -1
             last_crash_bounce_sim_min = -1
+            last_samsung_sim_min = -1
             last_closing_exit_slot = -1
         _last_ran["date"] = today
 
@@ -3790,6 +3864,17 @@ def main():
             ):
                 last_crash_bounce_sim_min = t
                 _check_crash_bounce_sim()
+
+        # ── 09:10~14:50 KST - 삼성전자 전용 시뮬 (3분 / 보유 1분) ───────────────
+        if (
+            samsung_005930_sim.is_enabled()
+            and samsung_005930_sim.is_monitor_window()
+            and 9 * 60 + 10 <= t <= 14 * 60 + 50
+        ):
+            interval = samsung_005930_sim.get_poll_interval_min()
+            if last_samsung_sim_min < 0 or t - last_samsung_sim_min >= interval:
+                last_samsung_sim_min = t
+                _check_samsung_sim()
 
         # ── 11:00~11:10 KST - 보충 스크리닝 (오전 워치리스트 0개) ─────────────
         if 11 * 60 <= t <= 11 * 60 + 10 and _last_ran.get("supplementary_screening") != today:
