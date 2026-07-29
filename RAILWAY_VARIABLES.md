@@ -177,7 +177,7 @@ CLOSING_RECOVERY_POSITIONS=042700|한미반도체|2026-07-15|2026-07-16,004310|�
 ## 🟦 삼성전자 전용 시뮬 (`ENABLE_SAMSUNG_SIM=true`)
 
 기존 자동매매는 그대로 두고, **삼성전자 1종목만** 별도 규칙으로 가상 매매합니다.
-핵심 아이디어는 **60일선 근처 눌림 + 시가 약세 + 5분봉 반등 확인**입니다.
+핵심 아이디어는 **B규칙: MA20>MA60 추세 + RSI≥50 + 전 20일 고가 돌파 + 거래량 확인**입니다.
 
 | Variable | 기본값 | 설명 |
 |----------|--------|------|
@@ -189,13 +189,10 @@ CLOSING_RECOVERY_POSITIONS=042700|한미반도체|2026-07-15|2026-07-16,004310|�
 | `SAMSUNG_SIM_AMOUNT` | `500000` | 가상 1회 매수금 |
 | `SAMSUNG_SIM_SCAN_INTERVAL` | `3` | 기본 점검 주기(분) |
 | `SAMSUNG_SIM_POSITION_POLL` | `1` | 보유 시 점검 주기(분) |
-| `SAMSUNG_SIM_MIN_DROP` | `0.3` | 시가 대비 최소 하락 |
-| `SAMSUNG_SIM_MAX_DROP` | `1.8` | 시가 대비 최대 하락 |
-| `SAMSUNG_SIM_MAX_ABOVE_MA60` | `2.5` | 60일선 위 허용 폭 |
-| `SAMSUNG_SIM_MAX_BELOW_MA60` | `1.5` | 60일선 아래 허용 폭 |
-| `SAMSUNG_SIM_MIN_RSI` | `35` | 일봉 RSI 하한 |
-| `SAMSUNG_SIM_MAX_RSI` | `58` | 일봉 RSI 상한 |
-| `SAMSUNG_SIM_MIN_VOLUME_RATIO` | `1.1` | 5분봉 반등 거래량 배수 |
+| `SAMSUNG_SIM_MIN_RSI` | `50` | 일봉 RSI 하한 (B규칙) |
+| `SAMSUNG_SIM_BREAKOUT_DAYS` | `20` | 돌파 기준 고가 구간(일) |
+| `SAMSUNG_SIM_MIN_VOLUME_RATIO` | `1.1` | 당일 거래량 / 직전 N일 평균 |
+| `SAMSUNG_SIM_VOLUME_AVG_DAYS` | `5` | 거래량 평균 일수 |
 | `SAMSUNG_SIM_STOP_LOSS` | `2.0` | 손절 -2% |
 | `SAMSUNG_SIM_TAKE_PROFIT` | `3.0` | 트레일링 시작 기준 +3% |
 | `SAMSUNG_SIM_TRAILING_STOP` | `0.6` | 고점 대비 하락 % |

@@ -400,7 +400,7 @@ def notify_samsung_sim_buy(
         f"종목: {name} ({code})\n"
         f"수량: {quantity}주 / 가격: {price:,}원\n"
         f"사유: {reason}\n"
-        f"⚠️ 시뮬만 — 실제 주문 없음 / 60일선 눌림 + 5분봉 반등"
+        f"⚠️ 시뮬만 — 실제 주문 없음 / B규칙 20일 고점 돌파 + 추세"
     )
 
 

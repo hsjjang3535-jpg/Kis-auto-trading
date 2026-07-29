@@ -3690,8 +3690,8 @@ def main():
             f"\n🟦 삼성전용: [시뮬만] / "
             f"{os.getenv('SAMSUNG_SIM_ENTRY_START', '09:10')}~"
             f"{os.getenv('SAMSUNG_SIM_ENTRY_END', '14:20')} / "
-            f"시가 -{samsung_005930_sim.MIN_DROP_PCT}~"
-            f"{samsung_005930_sim.MAX_DROP_PCT}% · 60일선 근처 눌림 + 5분봉 반등"
+            f"RSI≥{samsung_005930_sim.MIN_RSI:g} · "
+            f"{samsung_005930_sim.BREAKOUT_HIGH_DAYS}일 고점 돌파 + 추세(B)"
         )
     k1_pos_note = ""
     if _k1_closing_positions:

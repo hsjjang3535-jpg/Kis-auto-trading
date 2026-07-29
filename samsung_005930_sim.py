@@ -2,7 +2,8 @@
 삼성전자 전용 시뮬 (실제 주문 없음)
 
 - 대상: 삼성전자(005930) 1종목
-- 성격: 추세 상단 돌파보다 "60일선 근처 눌림 + 장중 5분봉 반등"에 맞춘 보수적 시뮬
+- 진입(B): 종가>MA20>MA60 · RSI≥50 · 전 20일 고가 돌파 · 당일 거래량 ≥ 직전 5일 평균×배수
+- 청산: 손절 -2% · +3% 이후 고점 대비 -0.6% 트레일 · 14:50 시간청산
 - 기존 자동매매와 독립 동작, 자금도 별도 가상 금액 사용
 """
 from __future__ import annotations
@@ -44,13 +45,10 @@ MAX_API_CALLS = int(os.getenv("SAMSUNG_SIM_MAX_API_CALLS", "6"))
 SCAN_INTERVAL_MIN = int(os.getenv("SAMSUNG_SIM_SCAN_INTERVAL", "3"))
 POSITION_POLL_MIN = int(os.getenv("SAMSUNG_SIM_POSITION_POLL", "1"))
 
-MIN_DROP_PCT = float(os.getenv("SAMSUNG_SIM_MIN_DROP", "0.3"))
-MAX_DROP_PCT = float(os.getenv("SAMSUNG_SIM_MAX_DROP", "1.8"))
-MAX_ABOVE_MA60_PCT = float(os.getenv("SAMSUNG_SIM_MAX_ABOVE_MA60", "2.5"))
-MAX_BELOW_MA60_PCT = float(os.getenv("SAMSUNG_SIM_MAX_BELOW_MA60", "1.5"))
-MIN_RSI = float(os.getenv("SAMSUNG_SIM_MIN_RSI", "35"))
-MAX_RSI = float(os.getenv("SAMSUNG_SIM_MAX_RSI", "58"))
+MIN_RSI = float(os.getenv("SAMSUNG_SIM_MIN_RSI", "50"))
+BREAKOUT_HIGH_DAYS = int(os.getenv("SAMSUNG_SIM_BREAKOUT_DAYS", "20"))
 MIN_VOLUME_RATIO = float(os.getenv("SAMSUNG_SIM_MIN_VOLUME_RATIO", "1.1"))
+VOLUME_AVG_DAYS = int(os.getenv("SAMSUNG_SIM_VOLUME_AVG_DAYS", "5"))
 
 STOP_LOSS_PCT = float(os.getenv("SAMSUNG_SIM_STOP_LOSS", "2.0"))
 TAKE_PROFIT_PCT = float(os.getenv("SAMSUNG_SIM_TAKE_PROFIT", "3.0"))
@@ -145,60 +143,48 @@ def _daily_rsi(closes_latest_first: list[float], period: int = 14) -> float:
     return round(100 - (100 / (1 + rs)), 2)
 
 
-def _daily_context(code: str) -> dict:
-    candles = kis_api.get_daily_chart(code, days=120)
+def _parse_candles(candles: list[dict]) -> tuple[list[float], list[float], list[float]]:
     closes: list[float] = []
+    highs: list[float] = []
+    volumes: list[float] = []
     for c in candles:
         try:
             closes.append(float(c.get("stck_clpr", 0)))
+            highs.append(float(c.get("stck_hgpr", 0)))
+            volumes.append(float(c.get("acml_vol", 0)))
         except (TypeError, ValueError):
             continue
-    if len(closes) < 60:
+    return closes, highs, volumes
+
+
+def _daily_breakout_context(code: str, current: float, today_volume: float) -> dict:
+    """일봉 B규칙 지표 (최신봉=오늘, current·당일 거래량으로 당일치 대체)."""
+    candles = kis_api.get_daily_chart(code, days=120)
+    closes, highs, volumes = _parse_candles(candles)
+    need = max(60, BREAKOUT_HIGH_DAYS + 1, VOLUME_AVG_DAYS + 1)
+    if len(closes) < need:
         return {}
-    ma20 = sum(closes[:20]) / 20
-    ma60 = sum(closes[:60]) / 60
-    rsi = _daily_rsi(closes, 14)
+
+    price_series = [current] + closes[1:60]
+    ma20 = sum(price_series[:20]) / 20
+    ma60 = sum(price_series[:60]) / 60
+    rsi_closes = [current] + closes[1:]
+    rsi = _daily_rsi(rsi_closes, 14)
+
+    prior_highs = highs[1 : BREAKOUT_HIGH_DAYS + 1]
+    high_n = max(prior_highs) if prior_highs else 0.0
+
+    prior_vols = volumes[1 : VOLUME_AVG_DAYS + 1]
+    vol_avg = sum(prior_vols) / len(prior_vols) if prior_vols else 0.0
+    vol_ratio = today_volume / vol_avg if vol_avg > 0 else 0.0
+
     return {
         "ma20": ma20,
         "ma60": ma60,
         "rsi": rsi,
+        "high_n": high_n,
+        "vol_ratio": vol_ratio,
     }
-
-
-def _drop_from_open(info: dict) -> float:
-    try:
-        open_p = float(info.get("stck_oprc", 0))
-        current = float(info.get("stck_prpr", 0))
-        if open_p <= 0:
-            return 0.0
-        return (open_p - current) / open_p * 100
-    except (TypeError, ValueError, ZeroDivisionError):
-        return 0.0
-
-
-def _ma60_gap_pct(current: float, ma60: float) -> float:
-    if ma60 <= 0:
-        return 0.0
-    return (current - ma60) / ma60 * 100
-
-
-def _has_rebound_signal(bars: list[dict]) -> tuple[bool, float]:
-    if len(bars) < 6:
-        return False, 0.0
-    recent = bars[-6:]
-    signal = recent[-1]
-    prev = recent[-2]
-    recent_low = min(b["low"] for b in recent[:-1])
-    if signal["close"] <= signal["open"]:
-        return False, 0.0
-    if signal["close"] <= prev["close"]:
-        return False, 0.0
-    if signal["close"] < recent_low * 1.002:
-        return False, 0.0
-    prior_volumes = [b.get("volume", 0) for b in recent[:-1]]
-    avg_vol = sum(prior_volumes) / len(prior_volumes) if prior_volumes else 0
-    vol_ratio = signal.get("volume", 0) / avg_vol if avg_vol > 0 else 0
-    return vol_ratio >= MIN_VOLUME_RATIO, vol_ratio
 
 
 def _evaluate_entry() -> tuple[dict | None, int]:
@@ -214,12 +200,13 @@ def _evaluate_entry() -> tuple[dict | None, int]:
     current = int(float(info.get("stck_prpr", 0)))
     if current <= 0:
         return None, used
-    drop = _drop_from_open(info)
-    if drop < MIN_DROP_PCT or drop > MAX_DROP_PCT:
-        return None, used
+    try:
+        today_volume = float(info.get("acml_vol", 0))
+    except (TypeError, ValueError):
+        today_volume = 0.0
 
     try:
-        daily = _daily_context(TARGET_CODE)
+        daily = _daily_breakout_context(TARGET_CODE, float(current), today_volume)
         used += 1
         _throttle()
     except Exception as e:
@@ -231,26 +218,16 @@ def _evaluate_entry() -> tuple[dict | None, int]:
     ma20 = float(daily.get("ma20", 0))
     ma60 = float(daily.get("ma60", 0))
     rsi = float(daily.get("rsi", 50))
-    ma60_gap = _ma60_gap_pct(current, ma60)
-    if ma60_gap > MAX_ABOVE_MA60_PCT or ma60_gap < -MAX_BELOW_MA60_PCT:
-        return None, used
-    if ma20 < ma60 * 0.985:
-        return None, used
-    if not (MIN_RSI <= rsi <= MAX_RSI):
-        return None, used
+    high_n = float(daily.get("high_n", 0))
+    vol_ratio = float(daily.get("vol_ratio", 0))
 
-    try:
-        intra = kis_api.get_intraday_5min_indicators(TARGET_CODE)
-        used += 1
-        _throttle()
-    except Exception as e:
-        print(f"[삼성시뮬] 분봉 실패: {e}")
+    if current <= ma20 or ma20 <= ma60:
         return None, used
-    if not intra or intra.get("bar_count", 0) < 6:
+    if rsi < MIN_RSI:
         return None, used
-
-    has_bounce, volume_ratio = _has_rebound_signal(intra.get("bars_5", []))
-    if not has_bounce:
+    if high_n <= 0 or current < high_n:
+        return None, used
+    if vol_ratio < MIN_VOLUME_RATIO:
         return None, used
 
     return {
@@ -260,11 +237,12 @@ def _evaluate_entry() -> tuple[dict | None, int]:
         "ma20": ma20,
         "ma60": ma60,
         "rsi": rsi,
-        "drop_from_open": round(drop, 2),
+        "high_n": high_n,
+        "vol_ratio": round(vol_ratio, 2),
         "strategy": STRATEGY,
         "reason": (
-            f"60일선 근처 눌림({ma60_gap:+.1f}%) · 시가대비 -{drop:.1f}% · "
-            f"일봉 RSI {rsi:.0f} · 5분봉 반등 거래량 {volume_ratio:.1f}배"
+            f"B 돌파 · {BREAKOUT_HIGH_DAYS}일 고가 {high_n:,.0f} 돌파 · "
+            f"가격>{ma20:,.0f}(MA20)>{ma60:,.0f}(MA60) · RSI {rsi:.0f} · 거래량 {vol_ratio:.1f}배"
         ),
     }, used
 
