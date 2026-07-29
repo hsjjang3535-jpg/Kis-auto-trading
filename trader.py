@@ -351,7 +351,7 @@ _closing_depleted_notified: bool = False        # 주문가능금액 0 알림 (1
 _closing_balance_fail_notified: bool = False    # 예수금 조회 실패 알림 (1회)
 
 # 오늘 체결된 매도 기록 (장중 + 종가베팅 모두 포함, 손익 보고용)
-# { name, code, quantity, buy_price, sell_price, profit_pct, profit_won, reason, strategy }
+# profit_won은 순손익(추정 수수료·세금 반영), gross_profit_won/total_cost_won은 선택 필드
 _trades_today: list[dict] = []
 
 # 일별 손익 장부 (주간 합산용)
@@ -649,6 +649,85 @@ def _load_state() -> None:
 def _format_won(amount: int) -> str:
     sign = "+" if amount > 0 else ""
     return f"{sign}{amount:,}원"
+
+
+def _resolve_live_buy_fill(
+    code: str,
+    result: dict,
+    requested_qty: int,
+    fallback_price: int,
+) -> dict:
+    """실전 매수 체결 평균단가/수량/추정비용 조회."""
+    fill = kis_api.get_order_fill(
+        code,
+        order_result=result,
+        side="buy",
+        expected_qty=requested_qty,
+    )
+    quantity = int(fill.get("filled_qty") or requested_qty or 0)
+    if quantity < 1:
+        quantity = max(int(requested_qty or 0), 1)
+    buy_price = int(fill.get("avg_price") or fallback_price or 0)
+    if buy_price <= 0:
+        buy_price = int(fallback_price or 0)
+    buy_amount = int(fill.get("total_amount") or (buy_price * quantity))
+    if buy_amount <= 0:
+        buy_amount = buy_price * quantity
+    return {
+        "quantity": quantity,
+        "buy_price": buy_price,
+        "buy_amount": buy_amount,
+        "buy_cost": int(fill.get("cost") or 0),
+        "buy_order_no": fill.get("order_no", ""),
+        "buy_fill_confirmed": bool(fill.get("confirmed")),
+    }
+
+
+def _resolve_live_sell_fill(
+    code: str,
+    pos: dict,
+    result: dict,
+    fallback_price: int,
+) -> dict:
+    """실전 매도 체결 평균단가/순손익 조회."""
+    quantity = int(pos.get("quantity") or 0)
+    fill = kis_api.get_order_fill(
+        code,
+        order_result=result,
+        side="sell",
+        expected_qty=quantity,
+    )
+    sell_price = int(fill.get("avg_price") or fallback_price or 0)
+    if sell_price <= 0:
+        sell_price = int(fallback_price or 0)
+    sell_amount = int(fill.get("total_amount") or (sell_price * quantity))
+    if sell_amount <= 0:
+        sell_amount = sell_price * quantity
+
+    buy_price = int(pos.get("buy_price") or 0)
+    buy_amount = int(pos.get("buy_amount") or (buy_price * quantity))
+    if buy_amount <= 0:
+        buy_amount = buy_price * quantity
+
+    buy_cost = int(pos.get("buy_cost") or 0)
+    sell_cost = int(fill.get("cost") or 0)
+    gross_profit_won = sell_amount - buy_amount
+    total_cost = buy_cost + sell_cost
+    net_profit_won = gross_profit_won - total_cost
+    profit_pct = (net_profit_won / buy_amount * 100) if buy_amount > 0 else 0.0
+
+    return {
+        "quantity": quantity,
+        "sell_price": sell_price,
+        "sell_amount": sell_amount,
+        "sell_cost": sell_cost,
+        "gross_profit_won": gross_profit_won,
+        "net_profit_won": net_profit_won,
+        "profit_pct": round(profit_pct, 2),
+        "sell_order_no": fill.get("order_no", ""),
+        "sell_fill_confirmed": bool(fill.get("confirmed")),
+        "cost_confirmed": bool(fill.get("confirmed")),
+    }
 
 
 def _collect_sim_pnl_today() -> tuple[int, int, list[tuple[str, int, int]]]:
@@ -2107,12 +2186,19 @@ def _check_closing_bet_entry() -> None:
 
             result = kis_api.buy_stock(code, quantity)
             if result.get("rt_cd") == "0":
-                invested = quantity * int(current)
+                fill = _resolve_live_buy_fill(code, result, quantity, int(current))
+                quantity = fill["quantity"]
+                buy_price = fill["buy_price"]
+                invested = fill["buy_amount"]
                 _closing_invested_today += invested
                 _closing_positions[code] = {
                     "name": name,
                     "quantity": quantity,
-                    "buy_price": int(current),
+                    "buy_price": buy_price,
+                    "buy_amount": invested,
+                    "buy_cost": fill["buy_cost"],
+                    "buy_order_no": fill["buy_order_no"],
+                    "buy_fill_confirmed": fill["buy_fill_confirmed"],
                     "strategy": "종가베팅",
                     "buy_reason": stock.get("reason", ""),
                     "buy_date": _today_kst(),
@@ -2128,12 +2214,12 @@ def _check_closing_bet_entry() -> None:
                 buy_date = _today_kst()
                 recovery_line = _closing_recovery_env_line(code, name, buy_date)
                 notifier.notify_buy(
-                    name, code, quantity, int(current),
+                    name, code, quantity, buy_price,
                     f"[종가베팅] {rank_note} · {stock.get('reason', '')}\n"
                     f"♻️ 재배포 복구용: <code>{recovery_line}</code>",
                 )
                 print(
-                    f"[종가베팅] 매수 {name}({code}) {quantity}주 @ {int(current):,} "
+                    f"[종가베팅] 매수 {name}({code}) {quantity}주 @ {buy_price:,} "
                     f"({rank_note})"
                 )
                 break  # 1종목 보유 — 체결 후 추가 시도 없음
@@ -2179,15 +2265,20 @@ def _execute_closing_sell(code: str, pos: dict, reason: str) -> None:
 
         result = kis_api.sell_stock(code, quantity)
         if result.get("rt_cd") == "0":
-            profit_won = int((current - pos["buy_price"]) * quantity)
+            fill = _resolve_live_sell_fill(code, pos, result, int(current))
+            current = float(fill["sell_price"])
+            profit_pct = float(fill["profit_pct"])
+            profit_won = int(fill["net_profit_won"])
             _trades_today.append({
                 "name": name,
                 "code": code,
-                "quantity": quantity,
+                "quantity": fill["quantity"],
                 "buy_price": pos["buy_price"],
-                "sell_price": int(current),
+                "sell_price": fill["sell_price"],
                 "profit_pct": round(profit_pct, 2),
                 "profit_won": profit_won,
+                "gross_profit_won": fill["gross_profit_won"],
+                "total_cost_won": int(pos.get("buy_cost", 0)) + fill["sell_cost"],
                 "sell_reason": sell_reason,
                 "buy_reason": pos.get("buy_reason", ""),
                 "strategy": "종가베팅",
@@ -2262,13 +2353,20 @@ def _check_crash_bounce_entry(afternoon: bool = False) -> None:
 
             result = kis_api.buy_stock(code, quantity)
             if result.get("rt_cd") == "0":
-                invested = quantity * int(current)
+                fill = _resolve_live_buy_fill(code, result, quantity, int(current))
+                quantity = fill["quantity"]
+                buy_price = fill["buy_price"]
+                invested = fill["buy_amount"]
                 _crash_bounce_invested_today += invested
                 _positions[code] = {
                     "name": name,
                     "quantity": quantity,
-                    "buy_price": int(current),
-                    "peak_price": int(current),
+                    "buy_price": buy_price,
+                    "buy_amount": invested,
+                    "buy_cost": fill["buy_cost"],
+                    "buy_order_no": fill["buy_order_no"],
+                    "buy_fill_confirmed": fill["buy_fill_confirmed"],
+                    "peak_price": buy_price,
                     "strategy": crash_bounce.STRATEGY,
                     "buy_reason": stock.get("reason", ""),
                     "buy_time": datetime.now(KST).isoformat(),
@@ -2280,10 +2378,10 @@ def _check_crash_bounce_entry(afternoon: bool = False) -> None:
                 already_held.add(code)
                 remaining = crash_bounce.MAX_AMOUNT - _crash_bounce_invested_today
                 notifier.notify_buy(
-                    name, code, quantity, int(current),
+                    name, code, quantity, buy_price,
                     f"[낙폭반등] {stock.get('reason', '')}",
                 )
-                print(f"[낙폭반등] 매수 {name}({code}) {quantity}주 @ {int(current):,}")
+                print(f"[낙폭반등] 매수 {name}({code}) {quantity}주 @ {buy_price:,}")
 
                 if remaining <= 0 or _crash_bounce_position_count() >= crash_bounce.MAX_POSITIONS:
                     break
@@ -2352,13 +2450,20 @@ def _check_v_reversal_entry(afternoon: bool = False) -> None:
 
             result = kis_api.buy_stock(code, quantity)
             if result.get("rt_cd") == "0":
-                invested = quantity * int(current)
+                fill = _resolve_live_buy_fill(code, result, quantity, int(current))
+                quantity = fill["quantity"]
+                buy_price = fill["buy_price"]
+                invested = fill["buy_amount"]
                 _v_reversal_invested_today += invested
                 _positions[code] = {
                     "name": name,
                     "quantity": quantity,
-                    "buy_price": int(current),
-                    "peak_price": int(current),
+                    "buy_price": buy_price,
+                    "buy_amount": invested,
+                    "buy_cost": fill["buy_cost"],
+                    "buy_order_no": fill["buy_order_no"],
+                    "buy_fill_confirmed": fill["buy_fill_confirmed"],
+                    "peak_price": buy_price,
                     "strategy": v_reversal.STRATEGY,
                     "buy_reason": stock.get("reason", ""),
                     "buy_time": datetime.now(KST).isoformat(),
@@ -2370,10 +2475,10 @@ def _check_v_reversal_entry(afternoon: bool = False) -> None:
                 already_held.add(code)
                 remaining = v_reversal.MAX_AMOUNT - _v_reversal_invested_today
                 notifier.notify_buy(
-                    name, code, quantity, int(current),
+                    name, code, quantity, buy_price,
                     f"[V자반등] {stock.get('reason', '')}",
                 )
-                print(f"[V자반등] 매수 {name}({code}) {quantity}주 @ {int(current):,}")
+                print(f"[V자반등] 매수 {name}({code}) {quantity}주 @ {buy_price:,}")
 
                 if remaining <= 0 or _v_reversal_position_count() >= v_reversal.MAX_POSITIONS:
                     break
@@ -2858,12 +2963,19 @@ def _check_k1_closing_entry() -> None:
 
             result = kis_api.buy_stock(code, quantity)
             if result.get("rt_cd") == "0":
-                invested = quantity * current
+                fill = _resolve_live_buy_fill(code, result, quantity, current)
+                quantity = fill["quantity"]
+                buy_price = fill["buy_price"]
+                invested = fill["buy_amount"]
                 _closing_invested_today += invested
                 _k1_closing_positions[code] = {
                     "name": name,
                     "quantity": quantity,
-                    "buy_price": current,
+                    "buy_price": buy_price,
+                    "buy_amount": invested,
+                    "buy_cost": fill["buy_cost"],
+                    "buy_order_no": fill["buy_order_no"],
+                    "buy_fill_confirmed": fill["buy_fill_confirmed"],
                     "strategy": k1_closing.STRATEGY,
                     "buy_reason": stock.get("reason", ""),
                     "buy_date": _today_kst(),
@@ -2873,10 +2985,10 @@ def _check_k1_closing_entry() -> None:
                 _save_state()
                 remaining -= invested
                 notifier.notify_buy(
-                    name, code, quantity, current,
+                    name, code, quantity, buy_price,
                     f"[K1종가] {stock.get('pattern', '')} · {stock.get('reason', '')}",
                 )
-                print(f"[K1종가] 매수 {name}({code}) {quantity}주 @ {current:,}")
+                print(f"[K1종가] 매수 {name}({code}) {quantity}주 @ {buy_price:,}")
                 break
             else:
                 notifier.notify_error(f"{name} K1 종가 매수 실패: {result.get('msg1', '')}")
@@ -2902,11 +3014,16 @@ def _check_k1_closing_exit() -> None:
             name = pos["name"]
             result = kis_api.sell_stock(code, quantity)
             if result.get("rt_cd") == "0":
-                profit_won = int((current - pos["buy_price"]) * quantity)
+                fill = _resolve_live_sell_fill(code, pos, result, int(current))
+                current = float(fill["sell_price"])
+                profit_pct = float(fill["profit_pct"])
+                profit_won = int(fill["net_profit_won"])
                 _trades_today.append({
-                    "name": name, "code": code, "quantity": quantity,
-                    "buy_price": pos["buy_price"], "sell_price": int(current),
+                    "name": name, "code": code, "quantity": fill["quantity"],
+                    "buy_price": pos["buy_price"], "sell_price": fill["sell_price"],
                     "profit_pct": round(profit_pct, 2), "profit_won": profit_won,
+                    "gross_profit_won": fill["gross_profit_won"],
+                    "total_cost_won": int(pos.get("buy_cost", 0)) + fill["sell_cost"],
                     "buy_reason": pos.get("buy_reason", ""),
                     "sell_reason": reason, "strategy": k1_closing.STRATEGY,
                 })
@@ -3145,7 +3262,10 @@ def _check_entry() -> None:
 
             result = kis_api.buy_stock(code, quantity)
             if result.get("rt_cd") == "0":
-                invested = quantity * int(current)
+                fill = _resolve_live_buy_fill(code, result, quantity, int(current))
+                quantity = fill["quantity"]
+                buy_price = fill["buy_price"]
+                invested = fill["buy_amount"]
                 _total_invested_today += invested
                 buy_reason = stock.get("reason", "")
                 if strategy == "돌파매매" and breakout_mode == "safe":
@@ -3165,8 +3285,12 @@ def _check_entry() -> None:
                 _positions[code] = {
                     "name": name,
                     "quantity": quantity,
-                    "buy_price": int(current),
-                    "peak_price": int(current),  # 트레일링 스탑용 고점 추적
+                    "buy_price": buy_price,
+                    "buy_amount": invested,
+                    "buy_cost": fill["buy_cost"],
+                    "buy_order_no": fill["buy_order_no"],
+                    "buy_fill_confirmed": fill["buy_fill_confirmed"],
+                    "peak_price": buy_price,  # 트레일링 스탑용 고점 추적
                     "strategy": strategy,
                     "buy_reason": buy_reason,
                     "buy_time": datetime.now(KST).isoformat(),
@@ -3175,7 +3299,7 @@ def _check_entry() -> None:
                 _save_state()
                 already_held.add(code)
                 remaining = MAX_TOTAL_AMOUNT - _total_invested_today
-                notifier.notify_buy(name, code, quantity, int(current), buy_reason)
+                notifier.notify_buy(name, code, quantity, buy_price, buy_reason)
 
                 if remaining <= 0:
                     break
@@ -3335,15 +3459,20 @@ def _execute_sell(code: str, pos: dict, reason: str,
             sell_reason = reason
             if price_fallback:
                 sell_reason = f"{reason} (현재가 조회 실패, 손익은 매수가 기준)"
-            profit_won = int((current - pos["buy_price"]) * quantity)
+            fill = _resolve_live_sell_fill(code, pos, result, int(current))
+            current = float(fill["sell_price"])
+            profit_pct = float(fill["profit_pct"])
+            profit_won = int(fill["net_profit_won"])
             _trades_today.append({
                 "name": name,
                 "code": code,
-                "quantity": quantity,
+                "quantity": fill["quantity"],
                 "buy_price": pos["buy_price"],
-                "sell_price": int(current),
+                "sell_price": fill["sell_price"],
                 "profit_pct": round(profit_pct, 2),
                 "profit_won": profit_won,
+                "gross_profit_won": fill["gross_profit_won"],
+                "total_cost_won": int(pos.get("buy_cost", 0)) + fill["sell_cost"],
                 "sell_reason": sell_reason,
                 "buy_reason": pos.get("buy_reason", ""),
                 "strategy": pos.get("strategy", ""),

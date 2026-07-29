@@ -736,6 +736,177 @@ def sell_stock(stock_code: str, quantity: int) -> dict:
     return data
 
 
+def _to_int(value, default: int = 0) -> int:
+    try:
+        text = str(value).strip().replace(",", "")
+        if not text:
+            return default
+        return int(float(text))
+    except (TypeError, ValueError):
+        return default
+
+
+def extract_order_no(order_result: dict | None) -> str:
+    """주문 응답에서 주문번호 추출."""
+    if not isinstance(order_result, dict):
+        return ""
+    candidates = [
+        order_result.get("ODNO"),
+        order_result.get("odno"),
+    ]
+    output = order_result.get("output")
+    if isinstance(output, dict):
+        candidates.extend([output.get("ODNO"), output.get("odno")])
+    for item in candidates:
+        text = str(item or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def inquire_daily_ccld(
+    order_date: str,
+    stock_code: str = "",
+    order_no: str = "",
+    side: str = "00",
+) -> dict:
+    """
+    당일 주문 체결 조회.
+    side: 00=전체, 01=매도, 02=매수
+    """
+    acc_no, acc_prod = get_account_parts()
+    tr_id = "TTTC8001R" if MODE == "실전" else "VTTC8001R"
+    path = "/uapi/domestic-stock/v1/trading/inquire-daily-ccld"
+    params = {
+        "CANO": acc_no,
+        "ACNT_PRDT_CD": acc_prod,
+        "INQR_STRT_DT": order_date,
+        "INQR_END_DT": order_date,
+        "SLL_BUY_DVSN_CD": side,
+        "INQR_DVSN": "00",
+        "PDNO": stock_code,
+        "CCLD_DVSN": "01",
+        "ORD_GNO_BRNO": "",
+        "ODNO": order_no,
+        "INQR_DVSN_3": "00",
+        "INQR_DVSN_1": "",
+        "CTX_AREA_FK100": "",
+        "CTX_AREA_NK100": "",
+        "EXCG_ID_DVSN_CD": "KRX",
+    }
+
+    _trade_throttle()
+    res = requests.get(
+        f"{TRADE_URL}{path}",
+        headers=_trade_headers(tr_id),
+        timeout=15,
+        params=params,
+    )
+    res.raise_for_status()
+    data = res.json()
+    if data.get("rt_cd") not in (None, "0"):
+        msg_cd = data.get("msg_cd", "")
+        msg1 = data.get("msg1", "알 수 없는 오류")
+        detail = f"{msg_cd}: {msg1}" if msg_cd else msg1
+        raise RuntimeError(f"KIS 체결조회 오류: {detail}")
+    return data
+
+
+def get_order_fill(
+    stock_code: str,
+    order_result: dict | None = None,
+    side: str = "buy",
+    expected_qty: int = 0,
+    retries: int = 3,
+    retry_delay: float = 0.7,
+) -> dict:
+    """
+    주문 응답의 주문번호로 당일 체결 평균단가/수량/추정비용을 조회.
+    반환: {confirmed, order_no, filled_qty, avg_price, total_amount, cost}
+    """
+    order_no = extract_order_no(order_result)
+    order_date = datetime.now(KST).strftime("%Y%m%d")
+    side_code = "02" if side == "buy" else "01" if side == "sell" else "00"
+    last_data: dict | None = None
+
+    for attempt in range(retries):
+        data = inquire_daily_ccld(
+            order_date=order_date,
+            stock_code=stock_code,
+            order_no=order_no,
+            side=side_code,
+        )
+        last_data = data
+        rows = data.get("output1") or []
+        if not isinstance(rows, list):
+            rows = []
+
+        matched: list[dict] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            row_code = str(row.get("pdno") or row.get("mksc_shrn_iscd") or "").strip()
+            row_order = str(row.get("odno") or row.get("ODNO") or "").strip()
+            if stock_code and row_code and row_code != stock_code:
+                continue
+            if order_no and row_order and row_order != order_no:
+                continue
+            matched.append(row)
+
+        filled_qty = 0
+        total_amount = 0
+        avg_price = 0
+        for row in matched:
+            qty = _to_int(row.get("tot_ccld_qty") or row.get("ccld_qty"))
+            amt = _to_int(row.get("tot_ccld_amt"))
+            avg = _to_int(row.get("avg_prvs") or row.get("avg_prvs_rt"))
+            if qty > filled_qty:
+                filled_qty = qty
+            if amt > total_amount:
+                total_amount = amt
+            if avg > 0:
+                avg_price = avg
+
+        summary = data.get("output2") or {}
+        if isinstance(summary, list):
+            summary = summary[0] if summary else {}
+        summary_qty = _to_int(summary.get("tot_ccld_qty"))
+        summary_amt = _to_int(summary.get("tot_ccld_amt"))
+        summary_avg = _to_int(summary.get("pchs_avg_pric") or summary.get("avg_prvs"))
+        if summary_qty > filled_qty:
+            filled_qty = summary_qty
+        if summary_amt > total_amount:
+            total_amount = summary_amt
+        if summary_avg > 0:
+            avg_price = summary_avg
+
+        if filled_qty > 0 and avg_price <= 0 and total_amount > 0:
+            avg_price = int(round(total_amount / filled_qty))
+        cost = _to_int(summary.get("prsm_tlex_smtl"))
+
+        if filled_qty > 0 and (expected_qty <= 0 or filled_qty >= expected_qty):
+            return {
+                "confirmed": True,
+                "order_no": order_no,
+                "filled_qty": filled_qty,
+                "avg_price": avg_price,
+                "total_amount": total_amount,
+                "cost": cost,
+            }
+
+        if attempt < retries - 1:
+            time.sleep(retry_delay * (attempt + 1))
+
+    return {
+        "confirmed": False,
+        "order_no": order_no,
+        "filled_qty": _to_int(((last_data or {}).get("output2") or {}).get("tot_ccld_qty")),
+        "avg_price": _to_int(((last_data or {}).get("output2") or {}).get("pchs_avg_pric")),
+        "total_amount": _to_int(((last_data or {}).get("output2") or {}).get("tot_ccld_amt")),
+        "cost": _to_int(((last_data or {}).get("output2") or {}).get("prsm_tlex_smtl")),
+    }
+
+
 def get_holdings() -> list[dict]:
     """보유 종목 조회"""
     acc_no, acc_prod = get_account_parts()
