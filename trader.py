@@ -34,6 +34,7 @@ import notifier
 import crash_bounce
 import crash_bounce_sim
 import samsung_005930_sim
+import synopex_025320_sim
 import v_reversal
 import ul_rebound
 import k1_closing
@@ -699,6 +700,8 @@ def _save_state() -> None:
         "crash_bounce_sim_invested_today": crash_bounce_sim.dump_sim_invested_today(),
         "samsung_sim_open": samsung_005930_sim.dump_open_position(),
         "samsung_sim_trades_today": samsung_005930_sim.dump_sim_trades_today(),
+        "synopex_sim_open": synopex_025320_sim.dump_open_position(),
+        "synopex_sim_trades_today": synopex_025320_sim.dump_sim_trades_today(),
         "closing_wl_snapshot": _closing_wl_snapshot,
         "closing_wl_staging": _closing_wl_staging,
         "closing_watchlist": _closing_watchlist,
@@ -860,6 +863,21 @@ def _load_state() -> None:
                     f"[상태 복원] 삼성전용 시뮬 체결 "
                     f"{len(samsung_005930_sim.get_sim_trades_today())}건 불러옴"
                 )
+            synopex_025320_sim.load_open_position(state.get("synopex_sim_open"))
+            synopex_025320_sim.load_sim_trades_today(
+                state.get("synopex_sim_trades_today", []),
+            )
+            if synopex_025320_sim.get_open_position():
+                pos = synopex_025320_sim.get_open_position()
+                print(
+                    f"[상태 복원] 시노펙스 시뮬 보유 "
+                    f"{pos['name']}({pos['code']}) 불러옴"
+                )
+            elif synopex_025320_sim.get_sim_trades_today():
+                print(
+                    f"[상태 복원] 시노펙스 시뮬 체결 "
+                    f"{len(synopex_025320_sim.get_sim_trades_today())}건 불러옴"
+                )
 
         ledger = state.get("daily_pnl_ledger", [])
         from_state: list[dict] = []
@@ -1010,6 +1028,7 @@ def _collect_sim_pnl_today() -> tuple[int, int, list[tuple[str, int, int]]]:
         ("강세V", strong_v_sim.get_sim_trades_today()),
         ("낙폭반등", crash_bounce_sim.get_sim_trades_today()),
         ("삼성전용", samsung_005930_sim.get_sim_trades_today()),
+        ("시노펙스", synopex_025320_sim.get_sim_trades_today()),
     ]
     details: list[tuple[str, int, int]] = []
     total_won = 0
@@ -2098,6 +2117,13 @@ def run_status_report() -> None:
                 f"오늘 {len(samsung_005930_sim.get_sim_trades_today())}건 / "
                 f"주기 {samsung_005930_sim.get_poll_interval_min()}분"
             )
+        if synopex_025320_sim.is_enabled():
+            open_sx = 1 if synopex_025320_sim.get_open_position() else 0
+            lines.append(
+                f"시노펙스 [시뮬]: 보유 {open_sx} / "
+                f"오늘 {len(synopex_025320_sim.get_sim_trades_today())}건 / "
+                f"주기 {synopex_025320_sim.get_poll_interval_min()}분"
+            )
         if pos_lines:
             lines.append("📌 장중 보유 종목:")
             lines.extend(pos_lines)
@@ -2179,6 +2205,10 @@ def run_closing_report() -> None:
         samsung_lines = samsung_005930_sim.format_summary()
         if samsung_lines:
             lines.extend(samsung_lines)
+            lines.append("")
+        synopex_lines = synopex_025320_sim.format_summary()
+        if synopex_lines:
+            lines.extend(synopex_lines)
             lines.append("")
         if not _watchlist:
             summary = _last_morning_summary
@@ -2323,6 +2353,11 @@ def run_closing_report() -> None:
     if samsung_lines:
         lines.append("")
         lines.extend(samsung_lines)
+
+    synopex_lines = synopex_025320_sim.format_summary()
+    if synopex_lines:
+        lines.append("")
+        lines.extend(synopex_lines)
 
     notifier.send("\n".join(lines))
     try:
@@ -2873,6 +2908,32 @@ def _check_samsung_sim() -> None:
     except Exception as e:
         print(f"[삼성시뮬] 구간 체크 오류: {e}")
         notifier.notify_error(f"삼성전용 시뮬 체크 오류: {e}")
+
+
+def _check_synopex_sim() -> None:
+    """시노펙스 전용 시뮬 진입·청산 (S·B10)"""
+    if not synopex_025320_sim.is_enabled() or not synopex_025320_sim.is_monitor_window():
+        return
+    try:
+        events, api_used = synopex_025320_sim.run_check()
+        if events:
+            for ev in events:
+                if ev.get("action") == "buy":
+                    notifier.notify_synopex_sim_buy(
+                        ev["name"], ev["code"], ev["quantity"], ev["price"], ev["reason"],
+                    )
+                elif ev.get("action") == "sell":
+                    notifier.notify_synopex_sim_sell(
+                        ev["name"], ev["code"], ev["quantity"],
+                        ev["buy_price"], ev["sell_price"],
+                        ev["profit_pct"], ev["profit_won"],
+                        ev["sell_reason"],
+                    )
+            _save_state()
+            print(f"[시노펙스시뮬] 이벤트 {len(events)}건 (API {api_used}회)")
+    except Exception as e:
+        print(f"[시노펙스시뮬] 구간 체크 오류: {e}")
+        notifier.notify_error(f"시노펙스 시뮬 체크 오류: {e}")
 
 
 def _check_strong_v_sim() -> None:
@@ -3882,6 +3943,7 @@ def _reset_daily_state() -> None:
     strong_v_sim.reset_daily_sim_trades()
     crash_bounce_sim.reset_daily_sim_trades()
     samsung_005930_sim.reset_daily_sim_trades()
+    synopex_025320_sim.reset_daily_sim_trades()
     _promote_closing_wl_staging()
     _save_state()
     print(f"[일별 초기화] {_today_kst()} 새 거래일 시작")
@@ -3985,10 +4047,23 @@ def main():
     if samsung_005930_sim.is_enabled():
         samsung_note = (
             f"\n🟦 삼성전용: [시뮬만] / "
-            f"{os.getenv('SAMSUNG_SIM_ENTRY_START', '09:10')}~"
-            f"{os.getenv('SAMSUNG_SIM_ENTRY_END', '14:20')} / "
+            f"{os.getenv('SAMSUNG_SIM_ENTRY_START', '09:00')}~"
+            f"{os.getenv('SAMSUNG_SIM_ENTRY_END', '15:00')} / "
             f"RSI≥{samsung_005930_sim.MIN_RSI:g} · "
             f"{samsung_005930_sim.BREAKOUT_HIGH_DAYS}일 고점 돌파 + 추세(B)"
+        )
+    synopex_note = ""
+    if synopex_025320_sim.is_enabled():
+        rules = []
+        if synopex_025320_sim.ENABLE_VOL_SPIKE:
+            rules.append("S거래량급증")
+        if synopex_025320_sim.ENABLE_B10:
+            rules.append("B10단기돌파")
+        synopex_note = (
+            f"\n🟪 시노펙스: [시뮬만] / "
+            f"{os.getenv('SYNOPEX_SIM_ENTRY_START', '09:00')}~"
+            f"{os.getenv('SYNOPEX_SIM_ENTRY_END', '15:00')} / "
+            f"{'·'.join(rules) or '규칙없음'}"
         )
     k1_pos_note = ""
     if _k1_closing_positions:
@@ -4033,6 +4108,7 @@ def main():
             f"{k2p_note}"
             f"{sv_note}"
             f"{samsung_note}"
+            f"{synopex_note}"
             f"{closing_pos_note}"
             f"{k1_pos_note}"
         )
@@ -4073,6 +4149,7 @@ def main():
     last_strong_v_min = -1    # 강세V 시뮬 가변 주기
     last_crash_bounce_sim_min = -1
     last_samsung_sim_min = -1
+    last_synopex_sim_min = -1
     last_closing_exit_slot = -1  # 종가베팅 손절/익절 5분 슬롯
 
     while True:
@@ -4089,6 +4166,7 @@ def main():
             last_strong_v_min = -1
             last_crash_bounce_sim_min = -1
             last_samsung_sim_min = -1
+            last_synopex_sim_min = -1
             last_closing_exit_slot = -1
         _last_ran["date"] = today
 
@@ -4162,16 +4240,27 @@ def main():
                 last_crash_bounce_sim_min = t
                 _check_crash_bounce_sim()
 
-        # ── 09:10~14:50 KST - 삼성전자 전용 시뮬 (3분 / 보유 1분) ───────────────
+        # ── 삼성전자 전용 시뮬 (ENTRY~EXIT, 기본 09:00~15:00) ─────────────────
         if (
             samsung_005930_sim.is_enabled()
             and samsung_005930_sim.is_monitor_window()
-            and 9 * 60 + 10 <= t <= 14 * 60 + 50
+            and samsung_005930_sim.ENTRY_START_MIN <= t <= samsung_005930_sim.EXIT_END_MIN
         ):
             interval = samsung_005930_sim.get_poll_interval_min()
             if last_samsung_sim_min < 0 or t - last_samsung_sim_min >= interval:
                 last_samsung_sim_min = t
                 _check_samsung_sim()
+
+        # ── 시노펙스 시뮬 S·B10 (ENTRY~EXIT, 기본 09:00~15:00) ────────────────
+        if (
+            synopex_025320_sim.is_enabled()
+            and synopex_025320_sim.is_monitor_window()
+            and synopex_025320_sim.ENTRY_START_MIN <= t <= synopex_025320_sim.EXIT_END_MIN
+        ):
+            interval = synopex_025320_sim.get_poll_interval_min()
+            if last_synopex_sim_min < 0 or t - last_synopex_sim_min >= interval:
+                last_synopex_sim_min = t
+                _check_synopex_sim()
 
         # ── 11:00~11:10 KST - 보충 스크리닝 (오전 워치리스트 0개) ─────────────
         if 11 * 60 <= t <= 11 * 60 + 10 and _last_ran.get("supplementary_screening") != today:

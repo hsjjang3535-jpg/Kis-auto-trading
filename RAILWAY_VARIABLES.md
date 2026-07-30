@@ -186,9 +186,9 @@ CLOSING_RECOVERY_POSITIONS=042700|한미반도체|2026-07-15|2026-07-16,004310|�
 |----------|--------|------|
 | `ENABLE_SAMSUNG_SIM` | `false` | 삼성전용 시뮬 ON |
 | `SAMSUNG_SIM_CODE` | `005930` | 대상 종목 |
-| `SAMSUNG_SIM_ENTRY_START` | `09:10` | 진입 시작 |
-| `SAMSUNG_SIM_ENTRY_END` | `14:20` | 진입 종료 |
-| `SAMSUNG_SIM_EXIT_END` | `14:50` | 시간 청산 |
+| `SAMSUNG_SIM_ENTRY_START` | `09:00` | 진입 시작 |
+| `SAMSUNG_SIM_ENTRY_END` | `15:00` | 진입 종료 |
+| `SAMSUNG_SIM_EXIT_END` | `15:00` | 시간 청산 |
 | `SAMSUNG_SIM_AMOUNT` | `500000` | 가상 1회 매수금 |
 | `SAMSUNG_SIM_SCAN_INTERVAL` | `3` | 기본 점검 주기(분) |
 | `SAMSUNG_SIM_POSITION_POLL` | `1` | 보유 시 점검 주기(분) |
@@ -201,6 +201,34 @@ CLOSING_RECOVERY_POSITIONS=042700|한미반도체|2026-07-15|2026-07-16,004310|�
 | `SAMSUNG_SIM_TRAILING_STOP` | `0.6` | 고점 대비 하락 % |
 
 > 삼성전자는 저변동 대형주라서, 다종목 급락반등보다 **작은 눌림에서 짧게 회복하는 패턴**에 맞춘 값입니다.
+
+---
+
+## 🟪 시노펙스 전용 시뮬 (`ENABLE_SYNOPEX_SIM=true`)
+
+기존 자동매매·삼성 시뮬과 독립. **일봉 S(거래량급증) + B10(단기돌파)** 두 규칙.
+둘 다 충족 시 **S 우선**, 동시 보유 1포지션.
+
+| Variable | 기본값 | 설명 |
+|----------|--------|------|
+| `ENABLE_SYNOPEX_SIM` | `false` | 시노펙스 시뮬 ON |
+| `SYNOPEX_SIM_CODE` | `025320` | 대상 종목 |
+| `SYNOPEX_SIM_ENABLE_VOL_SPIKE` | `true` | S 거래량급증 ON |
+| `SYNOPEX_SIM_ENABLE_B10` | `true` | B10 단기돌파 ON |
+| `SYNOPEX_SIM_ENTRY_START` | `09:00` | 진입 시작 |
+| `SYNOPEX_SIM_ENTRY_END` | `15:00` | 진입 종료 |
+| `SYNOPEX_SIM_EXIT_END` | `15:00` | 시간 청산 |
+| `SYNOPEX_SIM_AMOUNT` | `500000` | 가상 1회 매수금 |
+| `SYNOPEX_SIM_VOL_SPIKE_DAY_PCT` | `3.0` | S: 전일대비 최소 +% |
+| `SYNOPEX_SIM_VOL_SPIKE_VOL_RATIO` | `2.0` | S: 20일 평균 거래량 배수 |
+| `SYNOPEX_SIM_VOL_SPIKE_MAX_RSI` | `75` | S: RSI 상한 |
+| `SYNOPEX_SIM_B10_DAYS` | `10` | B10: 고가 구간(일) |
+| `SYNOPEX_SIM_B10_VOL_RATIO` | `1.5` | B10: 5일 평균 거래량 배수 |
+| `SYNOPEX_SIM_B10_MIN_RSI` | `45` | B10: RSI 하한 |
+| `SYNOPEX_SIM_B10_MAX_RSI` | `70` | B10: RSI 상한 |
+| `SYNOPEX_SIM_STOP_LOSS` | `2.0` | 손절 -2% |
+| `SYNOPEX_SIM_TAKE_PROFIT` | `3.0` | 트레일링 시작 +3% |
+| `SYNOPEX_SIM_TRAILING_STOP` | `0.6` | 고점 대비 하락 % |
 
 ---
 
