@@ -119,6 +119,9 @@ CLOSING_RECOVERY_POSITIONS=042700|한미반도체|2026-07-15|2026-07-16,004310|�
 | `CLOSING_FORCE_EXIT` | `15:00` | 익일 미청산 강제청산 시각 |
 | `CLOSING_BET_OVERHEAT_RSI` | `72` | 1순위 RSI 과열 시 2순위로 넘김 |
 | `CLOSING_BET_TRY_TOP_N` | `2` | 매수 시도 상위 N개 (1순위 과열·금액부족 시) |
+
+> 종가베팅 워치리스트는 익일 15:10 장마감 보고 직후 **가상손익 알림**이 갑니다.  
+> (전일 스크리닝가 매수 가정 → −손절/+익절/종가청산, 전일종가→금일종가 등락도 함께 표시)
 | `LOWER_RSI_MAX` | `50` | 하단매매 RSI 상한 |
 | `ENABLE_INTRADAY_AI` | `false` | 장중 AI (`true`=Groq 2차 필터, `false`=기술조건만) |
 

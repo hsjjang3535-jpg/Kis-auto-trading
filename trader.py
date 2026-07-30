@@ -269,6 +269,233 @@ def _refresh_closing_watchlist_live(stocks: list[dict]) -> list[dict]:
     return refreshed
 
 
+def _build_closing_wl_snap(stocks: list[dict], date: str | None = None) -> dict:
+    """익일 가상손익용 워치리스트 스냅샷."""
+    items = []
+    for i, s in enumerate(stocks, 1):
+        try:
+            entry = int(float(s.get("current") or 0))
+        except (TypeError, ValueError):
+            entry = 0
+        if entry <= 0:
+            continue
+        items.append({
+            "rank": i,
+            "code": s.get("code", ""),
+            "name": s.get("name", ""),
+            "entry_price": entry,
+            "change_rate": s.get("change_rate"),
+            "strength": s.get("strength", "-"),
+            "reason": s.get("reason", ""),
+            "priority_score": s.get("priority_score"),
+            "rsi": s.get("rsi"),
+            "vol_ratio": s.get("vol_ratio"),
+        })
+    return {
+        "date": date or _today_kst(),
+        "stocks": items,
+        "reported": False,
+    }
+
+
+def _store_closing_wl_snapshot(stocks: list[dict]) -> None:
+    """오늘 스크리닝 결과를 익일 리뷰용으로 저장 (미보고 전일분은 보호)."""
+    global _closing_wl_snapshot, _closing_wl_staging
+    today = _today_kst()
+    new_snap = _build_closing_wl_snap(stocks, today)
+    if not new_snap["stocks"]:
+        return
+    old = _closing_wl_snapshot
+    if (
+        isinstance(old, dict)
+        and old.get("stocks")
+        and not old.get("reported")
+        and str(old.get("date") or "") < today
+    ):
+        _closing_wl_staging = new_snap
+        print(
+            f"[종가베팅] 워치 스냅샷 staging 저장 {today} "
+            f"{len(new_snap['stocks'])}종목 (전일 리뷰 대기 유지)"
+        )
+    else:
+        _closing_wl_snapshot = new_snap
+        _closing_wl_staging = None
+        print(
+            f"[종가베팅] 워치 스냅샷 저장 {today} "
+            f"{len(new_snap['stocks'])}종목 (익일 가상손익용)"
+        )
+    _save_state()
+
+
+def _promote_closing_wl_staging() -> None:
+    global _closing_wl_snapshot, _closing_wl_staging
+    if not _closing_wl_staging:
+        return
+    if _closing_wl_snapshot and not _closing_wl_snapshot.get("reported"):
+        return
+    _closing_wl_snapshot = _closing_wl_staging
+    _closing_wl_staging = None
+    print(
+        f"[종가베팅] 워치 staging → 리뷰대기 "
+        f"{_closing_wl_snapshot.get('date')} "
+        f"{len(_closing_wl_snapshot.get('stocks', []))}종목"
+    )
+
+
+def _parse_daily_bar(candle: dict) -> dict | None:
+    try:
+        date = str(candle.get("stck_bsop_date") or "")
+        o = float(candle.get("stck_oprc") or 0)
+        h = float(candle.get("stck_hgpr") or 0)
+        low = float(candle.get("stck_lwpr") or 0)
+        c = float(candle.get("stck_clpr") or 0)
+    except (TypeError, ValueError):
+        return None
+    if not date or c <= 0:
+        return None
+    return {"date": date, "open": o, "high": h, "low": low, "close": c}
+
+
+def _sim_closing_next_day_exit(
+    entry: float, open_p: float, high: float, low: float, close: float,
+) -> tuple[float, float, str]:
+    """종가베팅 익일 규칙 가정 청산. (exit, pct, reason)"""
+    if entry <= 0:
+        return close, 0.0, "기준가 오류"
+    stop = entry * (1 - CLOSING_STOP_LOSS_PCT / 100)
+    tp = entry * (1 + CLOSING_TAKE_PROFIT_PCT / 100)
+
+    if open_p > 0:
+        if open_p <= stop:
+            pct = (open_p - entry) / entry * 100
+            return open_p, pct, f"시초 손절권 ({pct:.1f}%)"
+        if open_p >= tp:
+            pct = (open_p - entry) / entry * 100
+            return open_p, pct, f"시초 익절권 ({pct:.1f}%)"
+
+    hit_stop = low > 0 and low <= stop
+    hit_tp = high > 0 and high >= tp
+    if hit_stop and hit_tp:
+        # 일봉만으로는 선후 불명 → 보수적으로 손절 가정
+        return stop, -CLOSING_STOP_LOSS_PCT, (
+            f"손절(고저 동시·보수 −{CLOSING_STOP_LOSS_PCT:g}%)"
+        )
+    if hit_stop:
+        return stop, -CLOSING_STOP_LOSS_PCT, f"손절 (−{CLOSING_STOP_LOSS_PCT:g}%)"
+    if hit_tp:
+        return tp, CLOSING_TAKE_PROFIT_PCT, f"익절 (+{CLOSING_TAKE_PROFIT_PCT:g}%)"
+
+    pct = (close - entry) / entry * 100
+    force_h, force_m = divmod(CLOSING_FORCE_EXIT_MIN, 60)
+    return close, pct, f"{force_h:02d}:{force_m:02d} 강제청산(종가 {pct:+.1f}%)"
+
+
+def run_closing_watchlist_review() -> None:
+    """전일 종가베팅 워치리스트 → 익일 가상 손익 알림."""
+    global _closing_wl_snapshot
+    if not is_trading_day():
+        return
+
+    today = _today_kst()
+    snap = _closing_wl_snapshot
+    if not isinstance(snap, dict) or not snap.get("stocks"):
+        _promote_closing_wl_staging()
+        return
+    if snap.get("reported"):
+        _promote_closing_wl_staging()
+        return
+    snap_date = str(snap.get("date") or "")
+    if not snap_date or snap_date >= today:
+        return  # 당일 스크리닝분은 내일 리뷰
+
+    stocks = snap.get("stocks") or []
+    today_ymd = today.replace("-", "")
+    force_h, force_m = divmod(CLOSING_FORCE_EXIT_MIN, 60)
+    lines = [
+        f"🌙 <b>전일 종가베팅 워치 → 익일 가상손익</b>",
+        f"스크리닝일: {snap_date} → 평가일: {today}",
+        f"가정: 전일 종가 매수 → −{CLOSING_STOP_LOSS_PCT:g}%손절 / "
+        f"+{CLOSING_TAKE_PROFIT_PCT:g}%익절 / "
+        f"{force_h:02d}:{force_m:02d} 종가청산",
+        "",
+    ]
+    results: list[dict] = []
+    for s in stocks:
+        code = s.get("code", "")
+        name = s.get("name", code)
+        entry = int(s.get("entry_price") or 0)
+        rank = s.get("rank", "?")
+        if entry <= 0 or not code:
+            continue
+        try:
+            candles = kis_api.get_daily_chart(code, days=10)
+            time.sleep(0.25)
+        except Exception as e:
+            lines.append(f"{rank}. {name}({code}) — 일봉 조회 실패: {e}")
+            continue
+
+        bar = None
+        for c in candles or []:
+            parsed = _parse_daily_bar(c)
+            if parsed and parsed["date"] == today_ymd:
+                bar = parsed
+                break
+        if not bar and candles:
+            # 최신봉이 오늘이 아니면(지연) 최신봉 사용
+            bar = _parse_daily_bar(candles[0])
+
+        if not bar:
+            lines.append(f"{rank}. {name}({code}) — 당일 봉 없음")
+            continue
+
+        exit_p, sim_pct, reason = _sim_closing_next_day_exit(
+            float(entry), bar["open"], bar["high"], bar["low"], bar["close"],
+        )
+        day_pct = (bar["close"] - entry) / entry * 100
+        emoji = "📈" if sim_pct >= 0 else "📉"
+        sign = "+" if sim_pct >= 0 else ""
+        day_sign = "+" if day_pct >= 0 else ""
+        bought = any(
+            t.get("code") == code and t.get("strategy") == "종가베팅"
+            for t in _trades_today
+        ) or code in _closing_positions
+        tag = " · ✅실전매수" if bought else ""
+        lines.append(
+            f"{emoji} <b>{rank}위 {name}({code})</b>{tag}\n"
+            f"   가정매수 {entry:,} → 청산 {int(exit_p):,}원 "
+            f"{sign}{sim_pct:.2f}%\n"
+            f"   전일종가→금일종가 {day_sign}{day_pct:.2f}% "
+            f"(종가 {int(bar['close']):,})\n"
+            f"   청산가정: {reason}"
+        )
+        results.append({"sim_pct": sim_pct, "day_pct": day_pct, "rank": rank})
+
+    if results:
+        avg_sim = sum(r["sim_pct"] for r in results) / len(results)
+        avg_day = sum(r["day_pct"] for r in results) / len(results)
+        top = next((r for r in results if r.get("rank") == 1), results[0])
+        lines.append("")
+        lines.append(
+            f"평균 가상손익 {avg_sim:+.2f}% · 평균 종가등락 {avg_day:+.2f}% "
+            f"({len(results)}종목)"
+        )
+        lines.append(
+            f"1위 가상 {top['sim_pct']:+.2f}% / 종가등락 {top['day_pct']:+.2f}%"
+        )
+    else:
+        lines.append("평가 가능한 종목 없음")
+
+    notifier.send("\n".join(lines))
+    print(
+        f"[종가베팅] 전일 워치 가상손익 알림 "
+        f"{snap_date} → {today} ({len(results)}종목)"
+    )
+    snap["reported"] = True
+    _closing_wl_snapshot = snap
+    _promote_closing_wl_staging()
+    _save_state()
+
+
 def _sort_intraday_watchlist(stocks: list[dict]) -> list[dict]:
     return _sort_watchlist_by_priority(stocks, MAX_BUY_AMOUNT)
 
@@ -337,6 +564,11 @@ _sold_codes_today: set[str] = set()
 
 # 종가베팅 워치리스트 (14:00 스크리닝)
 _closing_watchlist: list[dict] = []
+
+# 전일 워치리스트 익일 가상손익 리뷰용
+# snapshot: 리뷰 대기(미보고) / staging: 오늘 스크리닝분(리뷰 후 승격)
+_closing_wl_snapshot: dict | None = None
+_closing_wl_staging: dict | None = None
 
 # 종가베팅 오버나이트 포지션 { 종목코드: {name, quantity, buy_price, buy_date} }
 _closing_positions: dict[str, dict] = {}
@@ -467,6 +699,8 @@ def _save_state() -> None:
         "crash_bounce_sim_invested_today": crash_bounce_sim.dump_sim_invested_today(),
         "samsung_sim_open": samsung_005930_sim.dump_open_position(),
         "samsung_sim_trades_today": samsung_005930_sim.dump_sim_trades_today(),
+        "closing_wl_snapshot": _closing_wl_snapshot,
+        "closing_wl_staging": _closing_wl_staging,
         "daily_pnl_ledger": _daily_pnl_ledger,
     }
     try:
@@ -483,6 +717,7 @@ def _load_state() -> None:
     global _v_reversal_invested_today, _k1_closing_positions
     global _daily_pnl_ledger, _sold_codes_today, _intraday_low_cash_notified
     global _buy_cash_fail_counts
+    global _closing_wl_snapshot, _closing_wl_staging
     if not os.path.exists(_STATE_FILE):
         return
     try:
@@ -510,6 +745,15 @@ def _load_state() -> None:
         _closing_positions = state.get("closing_positions", {})
         if _closing_positions:
             print(f"[상태 복원] 종가베팅 포지션 {len(_closing_positions)}개 불러옴 (오버나이트)")
+
+        _closing_wl_snapshot = state.get("closing_wl_snapshot")
+        _closing_wl_staging = state.get("closing_wl_staging")
+        if isinstance(_closing_wl_snapshot, dict) and _closing_wl_snapshot.get("stocks"):
+            print(
+                f"[상태 복원] 종가베팅 워치 리뷰대기 "
+                f"{_closing_wl_snapshot.get('date')} "
+                f"{len(_closing_wl_snapshot.get('stocks', []))}종목"
+            )
 
         ul_rebound.load_watchlist(state.get("ul_rebound_watchlist", {}))
         if ul_rebound.get_watchlist():
@@ -1538,6 +1782,7 @@ def run_closing_bet_screening() -> None:
         _closing_watchlist = approved
 
         if approved:
+            _store_closing_wl_snapshot(approved)
             mode_note = " (금요일·주말호재)" if is_friday else ""
             lines = [f"🌙 <b>종가베팅 워치리스트 {len(approved)}개</b>{mode_note} (조건 부합도순)\n"]
             for i, c in enumerate(approved, 1):
@@ -1948,6 +2193,10 @@ def run_closing_report() -> None:
                 skip = s.get("_skip_reason", "진입조건 미충족")
                 lines.append(f"  ❌ {s['name']}({s.get('strategy','')}): {skip}")
         notifier.send("\n".join(lines))
+        try:
+            run_closing_watchlist_review()
+        except Exception as e:
+            print(f"[종가베팅 워치 리뷰 오류] {e}")
         if datetime.now(KST).weekday() == 4:
             run_weekly_pnl_report()
         return
@@ -2068,6 +2317,10 @@ def run_closing_report() -> None:
         lines.extend(samsung_lines)
 
     notifier.send("\n".join(lines))
+    try:
+        run_closing_watchlist_review()
+    except Exception as e:
+        print(f"[종가베팅 워치 리뷰 오류] {e}")
     if datetime.now(KST).weekday() == 4:
         run_weekly_pnl_report()
 
@@ -3586,6 +3839,7 @@ def _reset_daily_state() -> None:
     strong_v_sim.reset_daily_sim_trades()
     crash_bounce_sim.reset_daily_sim_trades()
     samsung_005930_sim.reset_daily_sim_trades()
+    _promote_closing_wl_staging()
     _save_state()
     print(f"[일별 초기화] {_today_kst()} 새 거래일 시작")
 
