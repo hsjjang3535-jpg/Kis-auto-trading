@@ -701,6 +701,7 @@ def _save_state() -> None:
         "samsung_sim_trades_today": samsung_005930_sim.dump_sim_trades_today(),
         "closing_wl_snapshot": _closing_wl_snapshot,
         "closing_wl_staging": _closing_wl_staging,
+        "closing_watchlist": _closing_watchlist,
         "daily_pnl_ledger": _daily_pnl_ledger,
     }
     try:
@@ -717,7 +718,7 @@ def _load_state() -> None:
     global _v_reversal_invested_today, _k1_closing_positions
     global _daily_pnl_ledger, _sold_codes_today, _intraday_low_cash_notified
     global _buy_cash_fail_counts
-    global _closing_wl_snapshot, _closing_wl_staging
+    global _closing_wl_snapshot, _closing_wl_staging, _closing_watchlist
     if not os.path.exists(_STATE_FILE):
         return
     try:
@@ -754,6 +755,12 @@ def _load_state() -> None:
                 f"{_closing_wl_snapshot.get('date')} "
                 f"{len(_closing_wl_snapshot.get('stocks', []))}종목"
             )
+
+        if state.get("date") == _today_kst():
+            wl = state.get("closing_watchlist")
+            if isinstance(wl, list) and wl:
+                _closing_watchlist = wl
+                print(f"[상태 복원] 종가베팅 워치리스트 {len(_closing_watchlist)}개")
 
         ul_rebound.load_watchlist(state.get("ul_rebound_watchlist", {}))
         if ul_rebound.get_watchlist():
@@ -1783,6 +1790,7 @@ def run_closing_bet_screening() -> None:
 
         if approved:
             _store_closing_wl_snapshot(approved)
+            _save_state()
             mode_note = " (금요일·주말호재)" if is_friday else ""
             lines = [f"🌙 <b>종가베팅 워치리스트 {len(approved)}개</b>{mode_note} (조건 부합도순)\n"]
             for i, c in enumerate(approved, 1):
@@ -2356,11 +2364,21 @@ def _check_closing_bet_entry() -> None:
         return
 
     if not _closing_watchlist:
+        notifier.send("⚠️ 종가베팅 매수 스킵 — 워치리스트 비어 있음 (재시작·미스크리닝 가능)")
+        print("[종가베팅] 매수 스킵 — 워치리스트 없음")
         return
 
     global _closing_invested_today
     global _closing_depleted_notified, _closing_balance_fail_notified
     if len(_closing_positions) >= CLOSING_BET_MAX_POSITIONS:
+        held = ", ".join(
+            f"{p.get('name')}({c})" for c, p in _closing_positions.items()
+        )
+        notifier.send(
+            f"⚠️ 종가베팅 매수 스킵 — 이미 {len(_closing_positions)}종목 보유 "
+            f"(한도 {CLOSING_BET_MAX_POSITIONS})\n{held}"
+        )
+        print(f"[종가베팅] 매수 스킵 — 보유 한도 ({held})")
         return
 
     budget_remaining = MAX_CLOSING_AMOUNT - _closing_invested_today
@@ -2430,16 +2448,26 @@ def _check_closing_bet_entry() -> None:
         f"거래량 {top.get('vol_ratio', 0):.1f}x"
     )
 
+    skip_notes: list[str] = []
     for rank, stock in enumerate(buy_pool, 1):
         if _is_closing_overheated(stock):
+            rsi_v = float(stock.get("rsi") or 0)
             print(
                 f"[종가베팅] {stock['name']} RSI 과열 스킵 "
-                f"(RSI {float(stock.get('rsi') or 0):.0f} > {CLOSING_BET_OVERHEAT_RSI:g})"
+                f"(RSI {rsi_v:.0f} > {CLOSING_BET_OVERHEAT_RSI:g})"
             )
-            if rank == 1 and len(buy_pool) > 1:
+            if len(buy_pool) > 1 and rank < len(buy_pool):
+                skip_notes.append(
+                    f"{stock['name']} RSI {rsi_v:.0f} 과열 → 다음 순위 검토"
+                )
                 notifier.send(
-                    f"⚠️ 종가베팅 1순위 <b>{stock['name']}</b> RSI 과열 "
-                    f"({float(stock.get('rsi') or 0):.0f}) → 2순위 검토"
+                    f"⚠️ 종가베팅 {rank}순위 <b>{stock['name']}</b> RSI 과열 "
+                    f"({rsi_v:.0f} > {CLOSING_BET_OVERHEAT_RSI:g}) → 다음 순위 검토"
+                )
+            else:
+                skip_notes.append(
+                    f"{stock['name']} RSI {rsi_v:.0f} 과열 "
+                    f"(기준 {CLOSING_BET_OVERHEAT_RSI:g}) — 대체 후보 없음"
                 )
             continue
         if bought_this_slot >= CLOSING_BET_MAX_PER_SLOT:
@@ -2453,6 +2481,7 @@ def _check_closing_bet_entry() -> None:
         try:
             current = kis_api.get_current_price(code, fallback=stock.get("current"))
             if current == 0:
+                skip_notes.append(f"{name} 현재가 0")
                 continue
 
             buy_amount = min(MAX_CLOSING_BUY, remaining)
@@ -2463,6 +2492,9 @@ def _check_closing_bet_entry() -> None:
                 print(
                     f"[종가베팅] {name} 금액 부족 "
                     f"(현재가 {int(current):,}원 / 잔여 {remaining:,}원) → 다음 후보"
+                )
+                skip_notes.append(
+                    f"{name} 금액 부족 (현재가 {int(current):,}원 / 잔여 {remaining:,}원)"
                 )
                 if code not in _closing_low_cash_notified:
                     _closing_low_cash_notified.add(code)
@@ -2513,6 +2545,7 @@ def _check_closing_bet_entry() -> None:
                 break  # 1종목 보유 — 체결 후 추가 시도 없음
             else:
                 msg = result.get("msg1", "알 수 없는 오류")
+                skip_notes.append(f"{name} 주문실패: {msg}")
                 if _is_insufficient_orderable_cash(msg):
                     _record_buy_cash_fail(code, name, msg, "종가베팅 매수 실패")
                 else:
@@ -2537,7 +2570,17 @@ def _check_closing_bet_entry() -> None:
             if _is_insufficient_orderable_cash(e):
                 _record_buy_cash_fail(code, name, e, "종가베팅 진입 오류")
             else:
+                skip_notes.append(f"{name} 진입오류: {e}")
                 notifier.notify_error(f"{name} 종가베팅 진입 오류: {e}")
+
+    if bought_this_slot == 0:
+        detail = "\n".join(f"· {n}" for n in skip_notes) if skip_notes else "· 후보 조건 미충족"
+        notifier.send(
+            f"⚠️ <b>종가베팅 매수 없음</b>\n"
+            f"워치 {len(_closing_watchlist)}개 · 시도 {len(buy_pool)}개\n"
+            f"{detail}"
+        )
+        print(f"[종가베팅] 매수 없음 — {skip_notes or '조건 미충족'}")
 
 
 def _execute_closing_sell(code: str, pos: dict, reason: str) -> None:
