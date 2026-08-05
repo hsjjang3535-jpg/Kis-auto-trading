@@ -84,9 +84,10 @@ PATCH = {
     "K1_PLUS_IMMEDIATE_ON_BREACH": "true",
     "K1_PLUS_STOP_LOSS_PCT": "5.0",
     "K1_PLUS_MAX_RISK_TO_LOW_PCT": "8.0",
-    # 종가베팅 익일 청산 (시초가 강제매도 → 손절/익절/15:00)
+    # 종가베팅 익일 청산 (손절 / +4% 후 고점−2% 트레일 / 15:00)
     "CLOSING_STOP_LOSS_PCT": "2.0",
-    "CLOSING_TAKE_PROFIT_PCT": "3.0",
+    "CLOSING_TRAIL_START_PCT": "4.0",
+    "CLOSING_TRAIL_DROP_PCT": "2.0",
     "CLOSING_FORCE_EXIT": "15:00",
     # 낙폭반등: 실전 OFF + 시뮬 + 낙폭 상한
     "ENABLE_CRASH_BOUNCE": "false",

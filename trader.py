@@ -3,7 +3,7 @@
 
 스케줄 (한국시간 KST):
   09:00 - 종가베팅 오버나이트 동기화 (시초가 강제매도 없음)
-  09:00 ~ 15:00 - 전일 종가베팅 −2%손절 / ＋3%익절 모니터링
+  09:00 ~ 15:00 - 전일 종가베팅 −2%손절 / +4% 후 고점 −2% 트레일 익절 모니터링
   09:05 - 장중매매 워치리스트 스크리닝
   09:10 ~ 14:45 - 5분마다 장중매매 진입/청산 체크
   09:10 ~ 10:30 - 5분마다 낙폭반등 체크 (ENABLE_CRASH_BOUNCE=true 시)
@@ -95,9 +95,10 @@ def _parse_hhmm_env(name: str, default_h: int, default_m: int) -> int:
 
 CLOSING_BET_ENTRY_START = _parse_hhmm_env("CLOSING_BET_ENTRY_START", 14, 45)
 CLOSING_BET_ENTRY_END = _parse_hhmm_env("CLOSING_BET_ENTRY_END", 14, 50)
-# 종가베팅 익일 청산: 시초가 강제매도 대신 손절/익절 + 장 마감 강제
+# 종가베팅 익일 청산: 손절 + (고점 트레일 익절) + 장 마감 강제
 CLOSING_STOP_LOSS_PCT = float(os.getenv("CLOSING_STOP_LOSS_PCT", "2.0"))
-CLOSING_TAKE_PROFIT_PCT = float(os.getenv("CLOSING_TAKE_PROFIT_PCT", "3.0"))
+CLOSING_TRAIL_START_PCT = float(os.getenv("CLOSING_TRAIL_START_PCT", "4.0"))
+CLOSING_TRAIL_DROP_PCT = float(os.getenv("CLOSING_TRAIL_DROP_PCT", "2.0"))
 CLOSING_FORCE_EXIT_MIN = _parse_hhmm_env("CLOSING_FORCE_EXIT", 15, 0)
 
 
@@ -360,31 +361,44 @@ def _parse_daily_bar(candle: dict) -> dict | None:
 def _sim_closing_next_day_exit(
     entry: float, open_p: float, high: float, low: float, close: float,
 ) -> tuple[float, float, str]:
-    """종가베팅 익일 규칙 가정 청산. (exit, pct, reason)"""
+    """종가베팅 익일 규칙 가정 청산. (exit, pct, reason)
+
+    손절 −STOP / +TRAIL_START 이상 고점 후 고점 대비 −TRAIL_DROP 트레일 / 종가 강제.
+    일봉만으로 경로를 알 수 없으면 보수적으로 손절을 우선한다.
+    """
     if entry <= 0:
         return close, 0.0, "기준가 오류"
     stop = entry * (1 - CLOSING_STOP_LOSS_PCT / 100)
-    tp = entry * (1 + CLOSING_TAKE_PROFIT_PCT / 100)
+    arm = entry * (1 + CLOSING_TRAIL_START_PCT / 100)
 
-    if open_p > 0:
-        if open_p <= stop:
-            pct = (open_p - entry) / entry * 100
-            return open_p, pct, f"시초 손절권 ({pct:.1f}%)"
-        if open_p >= tp:
-            pct = (open_p - entry) / entry * 100
-            return open_p, pct, f"시초 익절권 ({pct:.1f}%)"
+    if open_p > 0 and open_p <= stop:
+        pct = (open_p - entry) / entry * 100
+        return open_p, pct, f"시초 손절권 ({pct:.1f}%)"
 
+    peak = max(x for x in (open_p, high, close) if x and x > 0) if any(
+        x and x > 0 for x in (open_p, high, close)
+    ) else 0.0
     hit_stop = low > 0 and low <= stop
-    hit_tp = high > 0 and high >= tp
-    if hit_stop and hit_tp:
-        # 일봉만으로는 선후 불명 → 보수적으로 손절 가정
-        return stop, -CLOSING_STOP_LOSS_PCT, (
-            f"손절(고저 동시·보수 −{CLOSING_STOP_LOSS_PCT:g}%)"
-        )
-    if hit_stop:
-        return stop, -CLOSING_STOP_LOSS_PCT, f"손절 (−{CLOSING_STOP_LOSS_PCT:g}%)"
-    if hit_tp:
-        return tp, CLOSING_TAKE_PROFIT_PCT, f"익절 (+{CLOSING_TAKE_PROFIT_PCT:g}%)"
+    armed = peak >= arm
+
+    if armed:
+        trail_line = peak * (1 - CLOSING_TRAIL_DROP_PCT / 100)
+        hit_trail = low > 0 and low <= trail_line
+        if hit_stop and hit_trail:
+            return stop, -CLOSING_STOP_LOSS_PCT, (
+                f"손절(고저 동시·보수 −{CLOSING_STOP_LOSS_PCT:g}%)"
+            )
+        if hit_trail:
+            pct = (trail_line - entry) / entry * 100
+            return trail_line, pct, (
+                f"트레일 익절 (고점 대비 −{CLOSING_TRAIL_DROP_PCT:g}%, "
+                f"+{CLOSING_TRAIL_START_PCT:g}% 이상 후)"
+            )
+        if hit_stop:
+            return stop, -CLOSING_STOP_LOSS_PCT, f"손절 (−{CLOSING_STOP_LOSS_PCT:g}%)"
+    else:
+        if hit_stop:
+            return stop, -CLOSING_STOP_LOSS_PCT, f"손절 (−{CLOSING_STOP_LOSS_PCT:g}%)"
 
     pct = (close - entry) / entry * 100
     force_h, force_m = divmod(CLOSING_FORCE_EXIT_MIN, 60)
@@ -416,7 +430,7 @@ def run_closing_watchlist_review() -> None:
         f"🌙 <b>전일 종가베팅 워치 → 익일 가상손익</b>",
         f"스크리닝일: {snap_date} → 평가일: {today}",
         f"가정: 전일 종가 매수 → −{CLOSING_STOP_LOSS_PCT:g}%손절 / "
-        f"+{CLOSING_TAKE_PROFIT_PCT:g}%익절 / "
+        f"+{CLOSING_TRAIL_START_PCT:g}% 후 고점 −{CLOSING_TRAIL_DROP_PCT:g}% 트레일 / "
         f"{force_h:02d}:{force_m:02d} 종가청산",
         "",
     ]
@@ -1270,6 +1284,7 @@ def sync_closing_positions_from_account(notify: bool = True) -> list[str]:
             "name": h["name"],
             "quantity": h["quantity"],
             "buy_price": h["buy_price"],
+            "peak_price": h["buy_price"],
             "strategy": "종가베팅",
             "buy_reason": "계좌 동기화 복원",
             "buy_date": default_buy,
@@ -1467,6 +1482,7 @@ def recover_configured_closing_positions() -> list[str]:
             "name": name,
             "quantity": quantity,
             "buy_price": buy_price,
+            "peak_price": buy_price,
             "strategy": "종가베팅",
             "buy_reason": "Railway 상태 유실 대비 지정 복구",
             "buy_date": buy_date,
@@ -1631,7 +1647,7 @@ def _closing_exit_rule_label() -> str:
     force_h, force_m = divmod(CLOSING_FORCE_EXIT_MIN, 60)
     return (
         f"−{CLOSING_STOP_LOSS_PCT:g}%손절 / "
-        f"+{CLOSING_TAKE_PROFIT_PCT:g}%익절 / "
+        f"+{CLOSING_TRAIL_START_PCT:g}% 후 고점 −{CLOSING_TRAIL_DROP_PCT:g}% 트레일 / "
         f"{force_h:02d}:{force_m:02d} 강제청산"
     )
 
@@ -1671,7 +1687,7 @@ def run_closing_bet_morning_sync() -> None:
 
 
 def check_closing_bet_exits() -> None:
-    """전일 종가베팅: −STOP 손절 / +TP 익절 (K1 제외)."""
+    """전일 종가베팅: −STOP 손절 / +TRAIL_START 후 고점 −DROP 트레일 (K1 제외)."""
     if not is_trading_day():
         return
 
@@ -1679,24 +1695,40 @@ def check_closing_bet_exits() -> None:
     if not due:
         return
 
+    changed = False
     for code, pos in list(due.items()):
         if pos.get("name") in SELL_BLACKLIST:
             continue
         try:
             current, profit_pct, _ = _sell_reference_price(code, pos["buy_price"])
+            buy = float(pos["buy_price"])
+            peak = float(pos.get("peak_price") or buy)
+            if current > peak:
+                peak = float(current)
+                pos["peak_price"] = int(peak) if peak >= 1 else peak
+                changed = True
+            peak_pct = (peak - buy) / buy * 100 if buy > 0 else 0
+            drop = (peak - current) / peak * 100 if peak > 0 else 0
+
             if profit_pct <= -CLOSING_STOP_LOSS_PCT:
                 _execute_closing_sell(
                     code, pos,
                     f"종가베팅 손절 ({profit_pct:.1f}%, −{CLOSING_STOP_LOSS_PCT:g}%)",
                 )
-            elif profit_pct >= CLOSING_TAKE_PROFIT_PCT:
+            elif (
+                peak_pct >= CLOSING_TRAIL_START_PCT
+                and drop >= CLOSING_TRAIL_DROP_PCT
+            ):
                 _execute_closing_sell(
                     code, pos,
-                    f"종가베팅 익절 ({profit_pct:.1f}%, +{CLOSING_TAKE_PROFIT_PCT:g}%)",
+                    f"종가베팅 트레일 익절 (+{profit_pct:.1f}% / "
+                    f"고점 {peak_pct:.1f}%에서 −{drop:.1f}%)",
                 )
             time.sleep(0.3)
         except Exception as e:
             print(f"[종가베팅 청산체크] {pos.get('name', code)}: {e}")
+    if changed:
+        _save_state()
 
 
 def run_closing_bet_force_exit() -> None:
@@ -2550,6 +2582,7 @@ def _check_closing_bet_entry() -> None:
                     "name": name,
                     "quantity": quantity,
                     "buy_price": buy_price,
+                    "peak_price": buy_price,
                     "buy_amount": invested,
                     "buy_cost": fill["buy_cost"],
                     "buy_order_no": fill["buy_order_no"],

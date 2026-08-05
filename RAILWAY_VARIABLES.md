@@ -115,7 +115,11 @@ CLOSING_RECOVERY_POSITIONS=042700|한미반도체|2026-07-15|2026-07-16,004310|�
 | `CLOSING_BET_ENTRY_START` | `14:45` | AI 종가베팅 매수 시작 (KST) |
 | `CLOSING_BET_ENTRY_END` | `14:50` | AI 종가베팅 매수 종료 (1회) |
 | `CLOSING_STOP_LOSS_PCT` | `2.0` | 익일 종가베팅 손절 % (시초가 강제매도 없음) |
-| `CLOSING_TAKE_PROFIT_PCT` | `3.0` | 익일 종가베팅 익절 % |
+| `CLOSING_TRAIL_START_PCT` | `4.0` | 익일 트레일 익절 시작(고점 수익률) % |
+| `CLOSING_TRAIL_DROP_PCT` | `2.0` | 고점 대비 하락 시 트레일 익절 % |
+
+> 예전 `CLOSING_TAKE_PROFIT_PCT`(하드 +3%)는 더 이상 쓰지 않습니다. Railway에서 제거하고  
+> `CLOSING_TRAIL_START_PCT=4.0`, `CLOSING_TRAIL_DROP_PCT=2.0`을 넣어 주세요.
 | `CLOSING_FORCE_EXIT` | `15:00` | 익일 미청산 강제청산 시각 |
 | `CLOSING_BET_OVERHEAT_RSI` | `72` | 1순위 RSI 과열 시 2순위로 넘김 |
 | `CLOSING_BET_TRY_TOP_N` | `2` | 매수 시도 상위 N개 (1순위 과열·금액부족 시) |
