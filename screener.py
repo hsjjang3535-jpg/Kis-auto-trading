@@ -48,8 +48,24 @@ BREAKOUT_MOMENTUM_5MIN_VOL = float(os.getenv("BREAKOUT_MOMENTUM_5MIN_VOL", "1.5"
 ENTRY_5MIN_CONFIRM = os.getenv("ENTRY_5MIN_CONFIRM", "true").lower() == "true"
 ENTRY_5MIN_VOLUME_RATIO = float(os.getenv("ENTRY_5MIN_VOLUME_RATIO", "1.0"))
 UPPER_TAIL_MAX = float(os.getenv("UPPER_TAIL_MAX", "0.35"))  # 윗꼬리 비율 상한
-CLOSING_BET_MIN_RATE = float(os.getenv("CLOSING_BET_MIN_RATE", "1.5"))  # 종가베팅 당일 상승 %
-CLOSING_BET_MAX_RATE = float(os.getenv("CLOSING_BET_MAX_RATE", "15.0"))  # 당일 상승 상한 (추격 방지)
+CLOSING_BET_MIN_RATE = float(os.getenv("CLOSING_BET_MIN_RATE", "2.0"))  # 종가베팅 당일 상승 %
+CLOSING_BET_MAX_RATE = float(os.getenv("CLOSING_BET_MAX_RATE", "10.0"))  # 당일 상승 상한 (추격 방지)
+# 1단계 매수 강화: 종가 고가권 · 전일고가 돌파 · MA20 · 윗꼬리
+CLOSING_BET_MIN_CLOSE_NEAR_HIGH = float(
+    os.getenv("CLOSING_BET_MIN_CLOSE_NEAR_HIGH", "0.70")
+)  # 종가/당일고가
+CLOSING_BET_REQUIRE_PREV_HIGH = (
+    os.getenv("CLOSING_BET_REQUIRE_PREV_HIGH", "true").lower() == "true"
+)
+CLOSING_BET_REQUIRE_MA20 = (
+    os.getenv("CLOSING_BET_REQUIRE_MA20", "true").lower() == "true"
+)
+CLOSING_BET_MAX_UPPER_TAIL = float(
+    os.getenv("CLOSING_BET_MAX_UPPER_TAIL", str(UPPER_TAIL_MAX))
+)
+CLOSING_BET_MIN_VOL = float(os.getenv("CLOSING_BET_MIN_VOL", "1.5"))
+CLOSING_BET_RSI_MIN = float(os.getenv("CLOSING_BET_RSI_MIN", "40"))
+CLOSING_BET_RSI_MAX = float(os.getenv("CLOSING_BET_RSI_MAX", "72"))
 LOWER_RSI_MAX = float(os.getenv("LOWER_RSI_MAX", "50"))  # 하단매매 RSI 상한
 
 
@@ -299,17 +315,49 @@ def _apply_technical_filter(stocks: list[dict]) -> tuple[list, list, list]:
     return upper, breakout, lower
 
 
+def _passes_closing_bet_tech(ind: dict, rate: float) -> tuple[bool, str]:
+    """종가베팅 1단계 매수 필터. (통과여부, 사유)"""
+    current = float(ind.get("current") or 0)
+    if current < MIN_PRICE:
+        return False, "저가주"
+    ma5 = float(ind.get("ma5") or 0)
+    ma20 = float(ind.get("ma20") or 0)
+    vol_ratio = float(ind.get("vol_ratio") or 0)
+    rsi = float(ind.get("rsi") or 50)
+    close_near = float(ind.get("close_near_high") or 0)
+    prev_high = float(ind.get("prev_high") or 0)
+    upper_tail = float(ind.get("upper_tail_ratio") or 0)
+
+    if rate < CLOSING_BET_MIN_RATE or rate >= CLOSING_BET_MAX_RATE:
+        return False, "등락범위"
+    if current < ma5:
+        return False, "MA5아래"
+    if CLOSING_BET_REQUIRE_MA20 and ma20 > 0 and current < ma20:
+        return False, "MA20아래"
+    if vol_ratio < CLOSING_BET_MIN_VOL:
+        return False, "거래량부족"
+    if not (CLOSING_BET_RSI_MIN <= rsi <= CLOSING_BET_RSI_MAX):
+        return False, "RSI범위"
+    if close_near < CLOSING_BET_MIN_CLOSE_NEAR_HIGH:
+        return False, "종가고가권미달"
+    if upper_tail > CLOSING_BET_MAX_UPPER_TAIL:
+        return False, "윗꼬리과다"
+    if CLOSING_BET_REQUIRE_PREV_HIGH and prev_high > 0 and current < prev_high:
+        return False, "전일고가미돌파"
+    return True, "ok"
+
+
 def screen_closing_bet_candidates(top_n: int = 20) -> list[dict]:
     """종가베팅 후보 선정 (14:00 스크리닝)
 
-    조건:
-    - 당일 상승률 1.5% ~ 15% 미만 (과열·추격 제외)
-    - 5일선 위 (상승 추세)
-    - 거래량 1.5배 이상 (모멘텀 확인)
-    - RSI 40~75 (적정 모멘텀, 과열 아님)
-    - 최대 5개 선정
+    1단계 매수 강화 (익일 청산 규칙은 기존 유지):
+    - 당일 상승 CLOSING_BET_MIN_RATE ~ MAX_RATE 미만
+    - MA5(·MA20) 위, 거래량·RSI 적정
+    - 종가/당일고가 비율(고가권), 윗꼬리 제한
+    - 전일 고가 돌파
+    - 최대 5개 (종가강도·거래량 우선, 등락률 추격 정렬 지양)
     """
-    print("\n[종가베팅 스크리너] 후보 선정 시작")
+    print("\n[종가베팅 스크리너] 후보 선정 시작 (매수강화)")
 
     kospi, _  = _fetch_market_stocks("0001", "코스피(종가)", top_n)
     time.sleep(0.5)
@@ -351,28 +399,42 @@ def screen_closing_bet_candidates(top_n: int = 20) -> list[dict]:
         if not ind:
             continue
 
-        current = ind["current"]
-        if current < MIN_PRICE:
+        ok, reason = _passes_closing_bet_tech(ind, rate)
+        if not ok:
             continue
 
-        ma5 = ind["ma5"]
-        vol_ratio = ind["vol_ratio"]
-        rsi = ind.get("rsi", 50.0)
+        current = ind["current"]
+        close_near = float(ind.get("close_near_high") or 0)
+        candidates.append({
+            "code": code,
+            "name": name,
+            "change_rate": rate,
+            "current": current,
+            "ma5": ind["ma5"],
+            "ma20": ind.get("ma20"),
+            "vol_ratio": ind["vol_ratio"],
+            "rsi": ind.get("rsi", 50.0),
+            "close_near_high": close_near,
+            "prev_high": ind.get("prev_high"),
+            "today_high": ind.get("today_high"),
+            "upper_tail_ratio": ind.get("upper_tail_ratio"),
+            "strategy": "종가베팅",
+        })
+        print(
+            f"  🌙 종가베팅: {name}({code}) {rate:+.1f}% "
+            f"종가강도{close_near:.0%} RSI{ind.get('rsi', 50):.0f} "
+            f"거래량{ind['vol_ratio']:.1f}x"
+        )
 
-        if current >= ma5 and vol_ratio >= VOL_RATIO_MIN and 40 <= rsi <= 75:
-            candidates.append({
-                "code": code,
-                "name": name,
-                "change_rate": rate,
-                "current": current,
-                "ma5": ma5,
-                "vol_ratio": vol_ratio,
-                "rsi": rsi,
-                "strategy": "종가베팅",
-            })
-            print(f"  🌙 종가베팅: {name}({code}) {rate:+.1f}% RSI{rsi:.0f} 거래량{vol_ratio:.1f}x")
-
-    candidates.sort(key=lambda x: x["change_rate"], reverse=True)
+    # 등락률 추격 대신: 종가강도 → 거래량 → 중간 상승률 선호
+    candidates.sort(
+        key=lambda x: (
+            float(x.get("close_near_high") or 0),
+            float(x.get("vol_ratio") or 0),
+            -abs(float(x.get("change_rate") or 0) - 5.0),
+        ),
+        reverse=True,
+    )
     result = candidates[:5]
 
     global _last_closing_stats
@@ -380,6 +442,13 @@ def screen_closing_bet_candidates(top_n: int = 20) -> list[dict]:
         "pool": len(all_stocks),
         "technical_pass": len(candidates),
         "final": len(result),
+        "filters": {
+            "min_rate": CLOSING_BET_MIN_RATE,
+            "max_rate": CLOSING_BET_MAX_RATE,
+            "close_near_high": CLOSING_BET_MIN_CLOSE_NEAR_HIGH,
+            "prev_high": CLOSING_BET_REQUIRE_PREV_HIGH,
+            "ma20": CLOSING_BET_REQUIRE_MA20,
+        },
     }
 
     print(f"\n[종가베팅 스크리너 완료] 최종 {len(result)}개 선정")

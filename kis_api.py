@@ -626,6 +626,9 @@ def get_chart_indicators(stock_code: str) -> dict:
         upper_tail_ratio = 0
 
     high_20 = max(highs[1:min(21, len(highs))])  # 전일 기준 20일 최고가 (오늘 제외)
+    today_high = highs[0] if highs else current
+    prev_high = highs[1] if len(highs) > 1 else 0.0
+    close_near_high = (current / today_high) if today_high > 0 else 0.0
 
     # RSI(14) 계산
     rsi = _calc_rsi(closes, period=14)
@@ -636,6 +639,9 @@ def get_chart_indicators(stock_code: str) -> dict:
         "ma20": ma20,
         "high_200": high_200,
         "high_20": high_20,
+        "today_high": today_high,
+        "prev_high": prev_high,
+        "close_near_high": close_near_high,
         "vol_ratio": vol_today / vol_avg5 if vol_avg5 > 0 else 0,
         "upper_tail_ratio": upper_tail_ratio,
         "rsi": rsi,

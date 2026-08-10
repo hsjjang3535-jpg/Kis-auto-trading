@@ -84,6 +84,12 @@ PATCH = {
     "K1_PLUS_IMMEDIATE_ON_BREACH": "true",
     "K1_PLUS_STOP_LOSS_PCT": "5.0",
     "K1_PLUS_MAX_RISK_TO_LOW_PCT": "8.0",
+    # 종가베팅 매수 강화 (익일 청산 규칙은 기존)
+    "CLOSING_BET_MIN_RATE": "2.0",
+    "CLOSING_BET_MAX_RATE": "10.0",
+    "CLOSING_BET_MIN_CLOSE_NEAR_HIGH": "0.70",
+    "CLOSING_BET_REQUIRE_PREV_HIGH": "true",
+    "CLOSING_BET_REQUIRE_MA20": "true",
     # 종가베팅 익일 청산 (손절 / +4% 후 고점−2% 트레일 / 15:00)
     "CLOSING_STOP_LOSS_PCT": "2.0",
     "CLOSING_TRAIL_START_PCT": "4.0",

@@ -12,7 +12,7 @@
   11:00 - 상태 보고 / 오전 워치리스트 0개 시 보충 스크리닝
   13:15 - 오전 미체결 낙폭반등·V자반등 오후 필터 1회 재검색
   14:00 - 종가베팅 스크리닝
-  14:45 ~ 14:50 - AI 종가베팅 매수 1회 (K1 종가는 14:20~14:50)
+  14:45 ~ 14:50 - AI 종가베팅 매수 1회 (월~금 동일, K1 신규매수 비활성)
   14:50 - 장중매매 잔여 포지션 강제 청산 (종가베팅 제외)
   15:00 - 종가베팅 잔여 포지션 강제 청산
   15:10 - 장마감 손익 보고 (손익금) / 금요일 주간 총손익
@@ -168,24 +168,32 @@ def _sort_watchlist_by_priority(stocks: list[dict], max_buy: int) -> list[dict]:
 def _closing_priority_score(stock: dict) -> float:
     """종가베팅 조건 부합도 (높을수록 우선 매수)
 
-    AI 강도 + 당일 상승률·거래량·RSI·MA5 위 안착도를 종가베팅 기준으로 가중.
+    종가강도·거래량·AI 강도 중심 (등락률 추격 가점 축소).
     """
     strength = str(stock.get("strength") or "-")
     score = float(_STRENGTH_SCORE.get(strength, 10))
 
     try:
+        near = float(stock.get("close_near_high") or 0)
+    except (TypeError, ValueError):
+        near = 0.0
+    if near >= screener.CLOSING_BET_MIN_CLOSE_NEAR_HIGH:
+        score += (near - screener.CLOSING_BET_MIN_CLOSE_NEAR_HIGH) * 80.0
+        score += 20.0
+
+    try:
         vol = float(stock.get("vol_ratio") or 0)
     except (TypeError, ValueError):
         vol = 0.0
-    # 거래량 1.5배(기본) 이상일수록 가점
-    score += min(max(vol - screener.VOL_RATIO_MIN, 0), 8.0) * 4.0
+    score += min(max(vol - screener.CLOSING_BET_MIN_VOL, 0), 8.0) * 4.0
 
     try:
         rate = float(stock.get("change_rate") or 0)
     except (TypeError, ValueError):
         rate = 0.0
-    # 당일 상승률 여유 (과열 구간은 상한)
-    score += min(max(rate - screener.CLOSING_BET_MIN_RATE, 0), 12.0) * 2.5
+    # 중간 상승(+3~7%) 선호, 과열 가점 축소
+    mid = abs(rate - 5.0)
+    score += max(0.0, 12.0 - mid) * 1.5
 
     try:
         rsi = float(stock.get("rsi") or 50)
@@ -201,14 +209,20 @@ def _closing_priority_score(stock: dict) -> float:
     try:
         current = float(stock.get("current") or 0)
         ma5 = float(stock.get("ma5") or 0)
+        ma20 = float(stock.get("ma20") or 0)
+        prev_high = float(stock.get("prev_high") or 0)
     except (TypeError, ValueError):
-        current, ma5 = 0.0, 0.0
+        current, ma5, ma20, prev_high = 0.0, 0.0, 0.0, 0.0
     if ma5 > 0 and current >= ma5:
         gap = (current - ma5) / ma5 * 100
         if 0.5 <= gap <= 6.0:
             score += 12.0
         elif gap <= 10.0:
             score += 6.0
+    if ma20 > 0 and current >= ma20:
+        score += 8.0
+    if prev_high > 0 and current >= prev_high:
+        score += 15.0
 
     try:
         price = float(stock.get("current") or 0)
@@ -246,7 +260,7 @@ def _is_closing_overheated(stock: dict) -> bool:
 
 
 def _refresh_closing_watchlist_live(stocks: list[dict]) -> list[dict]:
-    """매수 직전 현재가·등락률·RSI·거래량 갱신 후 우선순위 재계산용."""
+    """매수 직전 현재가·등락률·RSI·거래량·종가강도 갱신 후 우선순위 재계산용."""
     refreshed: list[dict] = []
     for s in stocks:
         item = dict(s)
@@ -265,6 +279,15 @@ def _refresh_closing_watchlist_live(stocks: list[dict]) -> list[dict]:
                 item["rsi"] = ind.get("rsi", item.get("rsi", 50))
                 item["vol_ratio"] = ind.get("vol_ratio", item.get("vol_ratio", 0))
                 item["ma5"] = ind.get("ma5", item.get("ma5", 0))
+                item["ma20"] = ind.get("ma20", item.get("ma20", 0))
+                item["close_near_high"] = ind.get(
+                    "close_near_high", item.get("close_near_high", 0)
+                )
+                item["prev_high"] = ind.get("prev_high", item.get("prev_high", 0))
+                item["today_high"] = ind.get("today_high", item.get("today_high", 0))
+                item["upper_tail_ratio"] = ind.get(
+                    "upper_tail_ratio", item.get("upper_tail_ratio", 0)
+                )
         except Exception as e:
             print(f"[종가베팅] {item.get('name')} 실시간 갱신 실패: {e}")
         refreshed.append(item)
@@ -1766,24 +1789,18 @@ def run_morning_sell_closing_bet() -> None:
 
 
 def run_closing_bet_screening() -> None:
-    """14:00 - 종가베팅 워치리스트 구성 (금·월=K1 / 화~목=기존 AI)"""
+    """14:00 - 종가베팅 워치리스트 구성 (월~금 동일 AI 종가베팅)"""
     if not is_trading_day():
         return
 
-    if k1_closing.is_enabled() and k1_closing.is_k1_closing_day():
-        run_k1_closing_screening()
-        return
-
     global _closing_watchlist, _last_closing_summary
-    is_friday = datetime.now(KST).weekday() == 4
     print(f"\n[{datetime.now(KST).strftime('%H:%M:%S')} KST] 종가베팅 스크리닝 시작")
-    if is_friday:
-        notifier.send(
-            "⏰ 오후 2시 - 종가베팅 스크리닝 시작\n"
-            "📅 <b>금요일 모드</b> — 뉴스 호재가 주말~월요일까지 이어질 종목 중심"
-        )
-    else:
-        notifier.send("⏰ 오후 2시 - 종가베팅 후보 스크리닝 시작")
+    notifier.send(
+        "⏰ 오후 2시 - 종가베팅 후보 스크리닝 시작\n"
+        f"필터: +{screener.CLOSING_BET_MIN_RATE:g}~{screener.CLOSING_BET_MAX_RATE:g}% · "
+        f"종가강도≥{screener.CLOSING_BET_MIN_CLOSE_NEAR_HIGH:.0%} · "
+        f"전일고가돌파 · MA20"
+    )
 
     try:
         candidates = screener.screen_closing_bet_candidates(top_n=20)
@@ -1796,13 +1813,11 @@ def run_closing_bet_screening() -> None:
                 c["name"], c["code"], c["change_rate"],
                 rsi=c.get("rsi"), vol_ratio=c.get("vol_ratio"),
                 current=c.get("current"), ma5=c.get("ma5"),
-                friday_weekend=is_friday,
+                friday_weekend=False,
             )
-            c["buy"] = ai_analyzer.is_closing_approved(result, friday_weekend=is_friday)
+            c["buy"] = ai_analyzer.is_closing_approved(result, friday_weekend=False)
             c["strength"] = result["strength"]
             c["reason"] = result["reason"]
-            if is_friday:
-                c["friday_mode"] = True
             if result["reason"] == "분석 실패":
                 ai_fail_count += 1
             if c["buy"]:
@@ -1814,18 +1829,11 @@ def run_closing_bet_screening() -> None:
             time.sleep(2)
 
         if candidates and ai_fail_count == len(candidates):
-            if is_friday:
-                notifier.send(
-                    "⚠️ 금요일 AI 분석 불가 — 주말 호재 검토 없이 종가베팅을 진행하지 않습니다."
-                )
-                approved = []
-                ai_rejected = []
-            else:
-                approved = candidates
-                ai_rejected = []
-                for c in approved:
-                    c.setdefault("reason", "AI 분석 불가 (기술적 조건 통과)")
-                    c.setdefault("strength", "약")
+            approved = candidates
+            ai_rejected = []
+            for c in approved:
+                c.setdefault("reason", "AI 분석 불가 (기술적 조건 통과)")
+                c.setdefault("strength", "약")
 
         # 조건 부합도 높은 종목부터 매수 (1종목 보유 시 최우선 1개만 체결)
         approved = _sort_closing_watchlist(approved)
@@ -1835,19 +1843,21 @@ def run_closing_bet_screening() -> None:
             "candidates": len(candidates),
             "approved": len(approved),
             "ai_rejected": ai_rejected,
-            "friday_mode": is_friday,
+            "friday_mode": False,
         }
         _closing_watchlist = approved
 
         if approved:
             _store_closing_wl_snapshot(approved)
             _save_state()
-            mode_note = " (금요일·주말호재)" if is_friday else ""
-            lines = [f"🌙 <b>종가베팅 워치리스트 {len(approved)}개</b>{mode_note} (조건 부합도순)\n"]
+            lines = [f"🌙 <b>종가베팅 워치리스트 {len(approved)}개</b> (조건 부합도순)\n"]
             for i, c in enumerate(approved, 1):
+                near = float(c.get("close_near_high") or 0)
+                near_txt = f" / 종가강도{near:.0%}" if near > 0 else ""
                 lines.append(
                     f"{i}. 🟣 {c['name']}({c['code']}) {c['change_rate']:+.1f}%\n"
                     f"   RSI:{c.get('rsi', 0):.0f} / 거래량{c.get('vol_ratio', 0):.1f}x"
+                    f"{near_txt}"
                     f" / 점수{c.get('priority_score', 0):.0f}\n"
                     f"   사유: {c.get('reason', '-')}"
                 )
@@ -2426,10 +2436,7 @@ def run_force_close() -> None:
 # ── 종가베팅 진입/청산 로직 ────────────────────────────────────────────────────
 
 def _check_closing_bet_entry() -> None:
-    """AI 종가베팅 매수 (기본 14:45~14:50 1회) — 화~목"""
-    if k1_closing.is_enabled() and k1_closing.is_k1_closing_day():
-        return
-
+    """AI 종가베팅 매수 (기본 14:45~14:50 1회) — 월~금 동일"""
     if not _closing_watchlist:
         notifier.send("⚠️ 종가베팅 매수 스킵 — 워치리스트 비어 있음 (재시작·미스크리닝 가능)")
         print("[종가베팅] 매수 스킵 — 워치리스트 없음")
@@ -2488,10 +2495,29 @@ def _check_closing_bet_entry() -> None:
 
     live = _refresh_closing_watchlist_live(candidates)
     max_rate = screener.CLOSING_BET_MAX_RATE
-    eligible = [
-        s for s in live
-        if float(s.get("change_rate") or 0) < max_rate
-    ]
+    min_rate = screener.CLOSING_BET_MIN_RATE
+    eligible = []
+    for s in live:
+        rate = float(s.get("change_rate") or 0)
+        if rate < min_rate or rate >= max_rate:
+            continue
+        ok, why = screener._passes_closing_bet_tech(
+            {
+                "current": s.get("current"),
+                "ma5": s.get("ma5"),
+                "ma20": s.get("ma20"),
+                "vol_ratio": s.get("vol_ratio"),
+                "rsi": s.get("rsi"),
+                "close_near_high": s.get("close_near_high"),
+                "prev_high": s.get("prev_high"),
+                "upper_tail_ratio": s.get("upper_tail_ratio"),
+            },
+            rate,
+        )
+        if ok:
+            eligible.append(s)
+        else:
+            print(f"[종가베팅] 매수직전 필터탈락 {s.get('name')}: {why}")
     if not eligible:
         names = ", ".join(
             f"{s.get('name')}({float(s.get('change_rate') or 0):+.1f}%)"
@@ -2499,10 +2525,10 @@ def _check_closing_bet_entry() -> None:
         )
         notifier.send(
             f"⚠️ <b>종가베팅 매수 스킵</b>\n"
-            f"후보 전원 당일 +{max_rate:g}% 이상 (추격 방지)\n"
+            f"매수 직전 강화필터 미충족 (등락·종가강도·전일고가 등)\n"
             f"{names}"
         )
-        print(f"[종가베팅] 매수 스킵 — 전원 +{max_rate:g}% 이상")
+        print("[종가베팅] 매수 스킵 — 직전 강화필터 전원 탈락")
         return
 
     pending = _sort_closing_watchlist(eligible)
@@ -4043,10 +4069,10 @@ def main():
             f"\n🟣 상한가 리바운드: [시뮬] 월~목 / 추적 {len(ul_rebound.get_watchlist())}개"
         )
     k1_note = ""
-    if k1_closing.is_enabled():
+    if _k1_closing_positions:
         k1_note = (
-            f"\n🔷 K1 종가: 금·월 실전 / 보유 {len(_k1_closing_positions)}개 / "
-            f"4일차 청산"
+            f"\n🔷 K1 종가: 신규매수 OFF(금=AI종가) / "
+            f"기존보유 {len(_k1_closing_positions)}개 → 4일차 청산"
         )
     k2_note = ""
     if k2_intraday.is_enabled():
@@ -4127,7 +4153,11 @@ def main():
             "📌 장중매매: 09:05 스크리닝 → 09:10~14:30 진입 → 14:50 강제청산\n"
             f"   장중 AI: {'ON (Groq)' if ENABLE_INTRADAY_AI else 'OFF (기술조건만)'}\n"
             "🌙 종가: 14:00 스크리닝 → 14:45 AI매수 "
-            f"(익일 {_closing_exit_rule_label()}) / 금 K1종가\n"
+            f"(익일 {_closing_exit_rule_label()}) / 월~금 동일\n"
+            f"   매수필터: +{screener.CLOSING_BET_MIN_RATE:g}~"
+            f"{screener.CLOSING_BET_MAX_RATE:g}% · "
+            f"종가강도≥{screener.CLOSING_BET_MIN_CLOSE_NEAR_HIGH:.0%} · "
+            f"전일고가·MA20\n"
             f"✅ 익절 트레일링 +{TAKE_PROFIT_PCT}% / "
             f"손절 −{STOP_LOSS_PCT}% (매수 {QUICK_STOP_WINDOW_MIN}분 내 −{QUICK_STOP_LOSS_PCT}%) / "
             f"15:10 손익보고"
@@ -4319,22 +4349,16 @@ def main():
             _last_ran["closing_bet_screening"] = today
             run_closing_bet_screening()
 
-        # ── 14:45~14:50 KST - AI 종가베팅 매수 1회 ───────────────────────────
+        # ── 14:45~14:50 KST - AI 종가베팅 매수 1회 (월~금) ───────────────────
         if (
             CLOSING_BET_ENTRY_START <= t <= CLOSING_BET_ENTRY_END
             and _last_ran.get("closing_bet_entry") != today
-            and not (k1_closing.is_enabled() and k1_closing.is_k1_closing_day())
         ):
             _last_ran["closing_bet_entry"] = today
             _check_closing_bet_entry()
 
-        # ── 14:20~14:50 KST - K1 종가베팅 매수 (5분마다) ─────────────────────
-        if 14 * 60 + 20 <= t <= 14 * 60 + 50:
-            slot = t // 5
-            if slot != last_closing_slot:
-                last_closing_slot = slot
-                if k1_closing.is_closing_entry_window():
-                    _check_k1_closing_entry()
+        # ── 14:20~14:50 KST - K1 종가 신규매수 (비활성: 금요일도 AI 종가와 동일) ─
+        # 기존 K1 보유 청산(_check_k1_closing_exit)만 유지
 
         # ── 14:50~15:00 KST - 장중매매 강제 청산 (종가베팅 제외) ────────────
         if 14 * 60 + 50 <= t <= 15 * 60 and _last_ran.get("force_close") != today:

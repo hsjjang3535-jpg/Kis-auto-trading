@@ -110,22 +110,25 @@ CLOSING_RECOVERY_POSITIONS=042700|한미반도체|2026-07-15|2026-07-16,004310|�
 | `ENTRY_5MIN_VOLUME_RATIO` | `1.0` | 5분봉 거래량 ≥ 직전 평균 배수 |
 | `W52_GAP_LOWER_MAX` | `25.0` | 하단매매 52주 고가 % |
 | `UPPER_TAIL_MAX` | `0.35` | 윗꼬리 비율 상한 |
-| `CLOSING_BET_MIN_RATE` | `1.5` | 종가베팅 당일 +1.5%↑ |
-| `CLOSING_BET_MAX_RATE` | `15.0` | 종가베팅 당일 상승 상한% (추격 방지, 미만만 매수) |
+| `CLOSING_BET_MIN_RATE` | `2.0` | 종가베팅 당일 상승 하한% |
+| `CLOSING_BET_MAX_RATE` | `10.0` | 종가베팅 당일 상승 상한% (추격 방지) |
+| `CLOSING_BET_MIN_CLOSE_NEAR_HIGH` | `0.70` | 종가/당일고가 하한 (고가권) |
+| `CLOSING_BET_REQUIRE_PREV_HIGH` | `true` | 전일 고가 돌파 필수 |
+| `CLOSING_BET_REQUIRE_MA20` | `true` | MA20 위 필수 |
+| `CLOSING_BET_MAX_UPPER_TAIL` | `0.35` | 종가베팅 윗꼬리 상한 |
 | `CLOSING_BET_ENTRY_START` | `14:45` | AI 종가베팅 매수 시작 (KST) |
 | `CLOSING_BET_ENTRY_END` | `14:50` | AI 종가베팅 매수 종료 (1회) |
 | `CLOSING_STOP_LOSS_PCT` | `2.0` | 익일 종가베팅 손절 % (시초가 강제매도 없음) |
 | `CLOSING_TRAIL_START_PCT` | `4.0` | 익일 트레일 익절 시작(고점 수익률) % |
 | `CLOSING_TRAIL_DROP_PCT` | `2.0` | 고점 대비 하락 시 트레일 익절 % |
-
-> 예전 `CLOSING_TAKE_PROFIT_PCT`(하드 +3%)는 더 이상 쓰지 않습니다. Railway에서 제거하고  
-> `CLOSING_TRAIL_START_PCT=4.0`, `CLOSING_TRAIL_DROP_PCT=2.0`을 넣어 주세요.
 | `CLOSING_FORCE_EXIT` | `15:00` | 익일 미청산 강제청산 시각 |
 | `CLOSING_BET_OVERHEAT_RSI` | `72` | 1순위 RSI 과열 시 2순위로 넘김 |
 | `CLOSING_BET_TRY_TOP_N` | `2` | 매수 시도 상위 N개 (1순위 과열·금액부족 시) |
 
-> 종가베팅 워치리스트는 익일 15:10 장마감 보고 직후 **가상손익 알림**이 갑니다.  
-> (전일 스크리닝가 매수 가정 → −손절/+익절/종가청산, 전일종가→금일종가 등락도 함께 표시)
+> 종가베팅은 **월~금 동일**(AI). 금요일 K1 신규매수 없음.  
+> 매수 필터만 강화, 익일 청산(−2% / +4% 트레일 / 15:00)은 기존과 동일.  
+> 워치리스트는 익일 15:10에 **가상손익 알림**.  
+> 예전 `CLOSING_TAKE_PROFIT_PCT`는 사용하지 않음 — Railway에서 제거하세요.
 | `LOWER_RSI_MAX` | `50` | 하단매매 RSI 상한 |
 | `ENABLE_INTRADAY_AI` | `false` | 장중 AI (`true`=Groq 2차 필터, `false`=기술조건만) |
 
@@ -290,27 +293,21 @@ CLOSING_RECOVERY_POSITIONS=042700|한미반도체|2026-07-15|2026-07-16,004310|�
 
 ---
 
-## 🔷 K1 종가베팅 (`ENABLE_K1_CLOSING=true`)
+## 🔷 K1 종가베팅 (신규 매수 비활성)
 
-**금·월** 실전 종가 매수 (기존 금요일 AI 종가 대체). **4일차** 전량 청산.
+금요일도 **AI 종가베팅**과 동일하게 운용합니다. K1 **신규 실전 매수는 코드에서 비활성**.  
+`ENABLE_K1_CLOSING`이 true여도 금요일 신규 매수는 하지 않으며, **기존 보유분만 4일차 청산**합니다.
 
 | Variable | 기본값 | 설명 |
 |----------|--------|------|
-| `ENABLE_K1_CLOSING` | `false` | K1 종가 ON |
-| `K1_CLOSING_ENTRY_START` | `14:20` | 매수 시작 |
-| `K1_CLOSING_ENTRY_END` | `14:50` | 매수 종료 |
-| `K1_MIN_TRADING_VALUE` | `50000000000` | 상한가 500억+ |
-| `K1_MAX_BUY_DAYS_AFTER_UL` | `2` | 상한가 후 2일까지만 |
-| `K1_FORCE_SELL_DAY` | `4` | 4일차 청산 |
-| `K1_SIM_ENABLED` | `true` | 시뮬 기록 (실전과 함께) |
+| `ENABLE_K1_CLOSING` | `false` | (레거시) 켜도 신규매수 안 함 |
+| `K1_FORCE_SELL_DAY` | `4` | 기존 보유 4일차 청산 |
 
 ### 요일별 스케줄
 
 | 요일 | 종가 전략 |
 |------|-----------|
-| 월 | **K1 실전** + 상한가 리바운딩 시뮬 (K1 우선) |
-| 화~목 | AI 종가베팅 + 상한가 리바운딩 시뮬 |
-| 금 | **K1 실전** (주말 보유) |
+| 월~금 | **AI 종가베팅** (강화 매수필터) + 상한가 리바운딩 시뮬 등 |
 
 ---
 
