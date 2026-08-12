@@ -80,6 +80,9 @@ CLOSING_RECOVERY_POSITIONS=042700|한미반도체|2026-07-15|2026-07-16,004310|�
 | `CLOSING_BET_MAX_PER_SLOT` | `1` | 5분 슬롯당 최대 매수 종목 |
 | `CLOSING_BET_MAX_POSITIONS` | `1` | 종가베팅 동시 보유 종목 수 |
 | `STOP_LOSS_PCT` | `2.0` | 손절 % (매수 후 창 경과 시) |
+| `LATE_INTRADAY_ENTRY_AFTER` | `14:00` | 이 시각 이후 장중 매수 → 연장청산 |
+| `INTRADAY_FORCE_CLOSE` | `14:50` | 14:00 이전 장중 매수 강제청산 |
+| `LATE_INTRADAY_FORCE_CLOSE` | `15:10` | 14:00 이후 장중 매수 연장 강제청산 |
 | `QUICK_STOP_LOSS_PCT` | `1.5` | 매수 직후 빠른 손절 % |
 | `QUICK_STOP_WINDOW_MIN` | `30` | 빠른 손절 적용 분(매수 후) |
 | `TAKE_PROFIT_PCT` | `3.0` | 트레일링 익절 시작 % |

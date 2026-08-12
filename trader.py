@@ -13,7 +13,8 @@
   13:15 - 오전 미체결 낙폭반등·V자반등 오후 필터 1회 재검색
   14:00 - 종가베팅 스크리닝
   14:45 ~ 14:50 - AI 종가베팅 매수 1회 (월~금 동일, K1 신규매수 비활성)
-  14:50 - 장중매매 잔여 포지션 강제 청산 (종가베팅 제외)
+  14:50 - 14:00 이전 장중매수 강제 청산
+  15:10 - 14:00 이후 장중매수 연장 강제 청산 (손절·트레일은 그대로)
   15:00 - 종가베팅 잔여 포지션 강제 청산
   15:10 - 장마감 손익 보고 (손익금) / 금요일 주간 총손익
 """
@@ -100,6 +101,10 @@ CLOSING_STOP_LOSS_PCT = float(os.getenv("CLOSING_STOP_LOSS_PCT", "2.0"))
 CLOSING_TRAIL_START_PCT = float(os.getenv("CLOSING_TRAIL_START_PCT", "4.0"))
 CLOSING_TRAIL_DROP_PCT = float(os.getenv("CLOSING_TRAIL_DROP_PCT", "2.0"))
 CLOSING_FORCE_EXIT_MIN = _parse_hhmm_env("CLOSING_FORCE_EXIT", 15, 0)
+# 14:00 이후 장중 매수 → 15:10까지 보유 (그 전 매수는 14:50 청산)
+LATE_INTRADAY_ENTRY_MIN = _parse_hhmm_env("LATE_INTRADAY_ENTRY_AFTER", 14, 0)
+INTRADAY_FORCE_CLOSE_MIN = _parse_hhmm_env("INTRADAY_FORCE_CLOSE", 14, 50)
+LATE_INTRADAY_FORCE_CLOSE_MIN = _parse_hhmm_env("LATE_INTRADAY_FORCE_CLOSE", 15, 10)
 
 
 def _priority_score(stock: dict, max_buy: int) -> float:
@@ -1338,10 +1343,44 @@ def is_entry_time() -> bool:
     return 9 * 60 + 10 <= t <= 14 * 60 + 30
 
 
+def _format_minutes_hhmm(tmin: int) -> str:
+    return f"{tmin // 60:02d}:{tmin % 60:02d}"
+
+
+def _buy_time_minutes(pos: dict) -> int | None:
+    raw = pos.get("buy_time")
+    if not raw:
+        return None
+    try:
+        bought = datetime.fromisoformat(str(raw))
+        if bought.tzinfo is None:
+            bought = bought.replace(tzinfo=KST)
+        bought = bought.astimezone(KST)
+        return bought.hour * 60 + bought.minute
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_late_intraday_entry(pos: dict) -> bool:
+    """14:00(설정) 이후 매수 — 14:50 대신 연장 청산 대상."""
+    buy_min = _buy_time_minutes(pos)
+    if buy_min is None:
+        return False
+    return buy_min >= LATE_INTRADAY_ENTRY_MIN
+
+
 def is_exit_time() -> bool:
-    """청산 체크 시간: 09:10 ~ 14:45"""
+    """청산 체크: 09:10~14:45, 오후매수 보유 시 연장청산 시각까지."""
     t = _market_minutes()
-    return 9 * 60 + 10 <= t <= 14 * 60 + 45
+    if t < 9 * 60 + 10:
+        return False
+    if t <= 14 * 60 + 45:
+        return True
+    if t <= LATE_INTRADAY_FORCE_CLOSE_MIN and any(
+        _is_late_intraday_entry(p) for p in _positions.values()
+    ):
+        return True
+    return False
 
 
 # ── 스케줄 함수 ───────────────────────────────────────────────────────────────
@@ -2411,25 +2450,76 @@ def run_closing_report() -> None:
 
 
 def run_force_close() -> None:
-    """14:50 - 장중매매 잔여 포지션 강제 청산 (종가베팅 포지션은 오버나이트 유지)"""
+    """14:50 - 14:00 이전 장중 매수 강제 청산 (오후 매수는 연장)"""
     if not is_trading_day():
         return
     if not _positions:
-        msg = "✅ 14:50 - 장중 포지션 없음, 청산 불필요"
+        hhmm = _format_minutes_hhmm(INTRADAY_FORCE_CLOSE_MIN)
+        msg = f"✅ {hhmm} - 장중 포지션 없음, 청산 불필요"
         if _closing_positions:
             msg += f"\n🌙 종가베팅 {len(_closing_positions)}개 오버나이트 유지"
         notifier.send(msg)
         return
 
-    print(f"\n[{datetime.now(KST).strftime('%H:%M:%S')} KST] 강제 청산 시작 ({len(_positions)}개)")
-    closing_note = f" | 🌙 종가베팅 {len(_closing_positions)}개 오버나이트 유지" if _closing_positions else ""
-    notifier.send(f"⏰ 14시 50분 - 장중 잔여 포지션 {len(_positions)}개 강제 청산{closing_note}")
+    early = {
+        c: p for c, p in _positions.items()
+        if not _is_late_intraday_entry(p)
+    }
+    late = {
+        c: p for c, p in _positions.items()
+        if _is_late_intraday_entry(p)
+    }
+    hhmm = _format_minutes_hhmm(INTRADAY_FORCE_CLOSE_MIN)
+    late_hhmm = _format_minutes_hhmm(LATE_INTRADAY_FORCE_CLOSE_MIN)
+    closing_note = f" | 🌙 종가베팅 {len(_closing_positions)}개 오버나이트" if _closing_positions else ""
 
-    for code, pos in list(_positions.items()):
+    if late:
+        late_names = ", ".join(p["name"] for p in late.values())
+        notifier.send(
+            f"⏰ {hhmm} — 오후매수 {len(late)}개 "
+            f"{late_hhmm} 연장청산 ({late_names}){closing_note}"
+        )
+
+    if not early:
+        print(f"[{datetime.now(KST).strftime('%H:%M:%S')} KST] 14:50 — 오후매수만 보유, 연장")
+        return
+
+    print(f"\n[{datetime.now(KST).strftime('%H:%M:%S')} KST] 강제 청산 {len(early)}개")
+    notifier.send(
+        f"⏰ {hhmm} — 장중 {len(early)}개 강제 청산{closing_note}"
+    )
+
+    for code, pos in list(early.items()):
         if pos["name"] in SELL_BLACKLIST:
             notifier.send(f"🚫 {pos['name']} - 매도 금지 종목, 보유 유지")
             continue
         _execute_sell(code, pos, "장 마감 전 강제 청산")
+        time.sleep(0.5)
+
+
+def run_late_force_close() -> None:
+    """15:10 - 14:00 이후 장중 매수 잔여 포지션 강제 청산"""
+    if not is_trading_day() or not _positions:
+        return
+
+    late = {
+        c: p for c, p in _positions.items()
+        if _is_late_intraday_entry(p)
+    }
+    if not late:
+        return
+
+    late_hhmm = _format_minutes_hhmm(LATE_INTRADAY_FORCE_CLOSE_MIN)
+    print(f"\n[{datetime.now(KST).strftime('%H:%M:%S')} KST] 오후매수 연장 청산 {len(late)}개")
+    notifier.send(
+        f"⏰ {late_hhmm} — 오후매수 {len(late)}개 연장 강제 청산"
+    )
+
+    for code, pos in list(late.items()):
+        if pos["name"] in SELL_BLACKLIST:
+            notifier.send(f"🚫 {pos['name']} - 매도 금지 종목, 보유 유지")
+            continue
+        _execute_sell(code, pos, f"오후매수 연장청산 ({late_hhmm})")
         time.sleep(0.5)
 
 
@@ -4150,7 +4240,10 @@ def main():
             f"📍 모드: {os.getenv('KIS_MODE', '모의')}\n"
             f"{'✅' if acc_ok else '⚠️'} 계좌: {acc_msg}\n"
             f"{cash_line}"
-            "📌 장중매매: 09:05 스크리닝 → 09:10~14:30 진입 → 14:50 강제청산\n"
+            "📌 장중매매: 09:05 스크리닝 → 09:10~14:30 진입 → "
+            f"{_format_minutes_hhmm(INTRADAY_FORCE_CLOSE_MIN)} 청산 · "
+            f"{_format_minutes_hhmm(LATE_INTRADAY_ENTRY_MIN)} 이후매수 "
+            f"{_format_minutes_hhmm(LATE_INTRADAY_FORCE_CLOSE_MIN)} 연장청산\n"
             f"   장중 AI: {'ON (Groq)' if ENABLE_INTRADAY_AI else 'OFF (기술조건만)'}\n"
             "🌙 종가: 14:00 스크리닝 → 14:45 AI매수 "
             f"(익일 {_closing_exit_rule_label()}) / 월~금 동일\n"
@@ -4271,8 +4364,8 @@ def main():
                     run_k2_morning_scan()
                     run_ul_rebound_morning_scan()
 
-        # ── 09:10~14:45 KST - 5분마다 장중 진입/청산 체크 ───────────────────
-        if 9 * 60 + 10 <= t <= 14 * 60 + 45:
+        # ── 09:10~15:10 KST - 5분마다 장중 진입/청산 (오후매수는 15:10까지 청산체크) ─
+        if 9 * 60 + 10 <= t <= LATE_INTRADAY_FORCE_CLOSE_MIN:
             slot = t // 5
             if slot != last_5min_slot:
                 last_5min_slot = slot
@@ -4360,10 +4453,21 @@ def main():
         # ── 14:20~14:50 KST - K1 종가 신규매수 (비활성: 금요일도 AI 종가와 동일) ─
         # 기존 K1 보유 청산(_check_k1_closing_exit)만 유지
 
-        # ── 14:50~15:00 KST - 장중매매 강제 청산 (종가베팅 제외) ────────────
-        if 14 * 60 + 50 <= t <= 15 * 60 and _last_ran.get("force_close") != today:
+        # ── 14:50~15:00 KST - 14:00 이전 장중매수 강제 청산 ─────────────────
+        if (
+            INTRADAY_FORCE_CLOSE_MIN <= t <= INTRADAY_FORCE_CLOSE_MIN + 10
+            and _last_ran.get("force_close") != today
+        ):
             _last_ran["force_close"] = today
             run_force_close()
+
+        # ── 15:10~15:20 KST - 14:00 이후 장중매수 연장 강제 청산 ───────────
+        if (
+            LATE_INTRADAY_FORCE_CLOSE_MIN <= t <= LATE_INTRADAY_FORCE_CLOSE_MIN + 10
+            and _last_ran.get("late_force_close") != today
+        ):
+            _last_ran["late_force_close"] = today
+            run_late_force_close()
 
         # ── 15:10~15:30 KST - 장마감 손익 보고 ──────────────────────────────
         if 15 * 60 + 10 <= t <= 15 * 60 + 30 and _last_ran.get("closing") != today:
