@@ -65,6 +65,25 @@ CLOSING_RECOVERY_POSITIONS=042700|한미반도체|2026-07-15|2026-07-16,004310|�
 | `ENABLE_CRASH_BOUNCE` | `true` | 낙폭반등 ON |
 | `DYNAMIC_CAPITAL` | `true` | 예수금 기준 자동 한도 조절 |
 | `BUY_RATIO` | `0.5` | 1회 매수 = 예수금 50% |
+| `ENABLE_MARKET_FILTER` | `true` | 지수 약세 시 신규매수 차단 |
+
+---
+
+## 🟢 지수필터 (약세장 신규매수 차단)
+
+코스피·코스닥이 약하면 **장중·V자·낙폭 신규매수**를 막습니다.  
+보유 청산(손절·익절·강제청산)은 그대로 동작합니다.
+
+| Variable | 기본값 | 설명 |
+|----------|--------|------|
+| `ENABLE_MARKET_FILTER` | `true` | 필터 ON |
+| `MARKET_FILTER_KOSDAQ_MIN` | `-0.8` | 코스닥 등락 ≤ 이 값이면 약세 |
+| `MARKET_FILTER_KOSPI_MIN` | `-1.0` | 코스피 등락 ≤ 이 값이면 약세 |
+| `MARKET_FILTER_REQUIRE` | `any` | `any`=하나라도 약하면 차단 / `both`=둘 다 약해야만 |
+| `MARKET_FILTER_BLOCK_CLOSING` | `false` | `true`면 종가베팅 신규도 차단 |
+| `MARKET_FILTER_CACHE_SEC` | `60` | 지수 조회 캐시(초) |
+
+차단·해제 시 텔레그램 알림 1회. 지수 조회 실패 시에는 매수를 막지 않습니다.
 
 ---
 

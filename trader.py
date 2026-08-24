@@ -43,6 +43,7 @@ import k2_intraday
 import k1_plus
 import k2_plus
 import strong_v_sim
+import market_filter
 
 load_dotenv()
 
@@ -2048,10 +2049,19 @@ def run_market_check() -> None:
     if is_exit_time():
         _check_exit()
 
-    if crash_bounce.is_enabled() and not crash_bounce_sim.is_enabled():
+    try:
+        market_filter.notify_if_changed(notifier.send)
+    except Exception as e:
+        print(f"[지수필터] 알림 오류: {e}")
+
+    allow_intraday, mkt_reason = market_filter.allow_new_buy(for_closing=False)
+    if not allow_intraday:
+        print(f"[지수필터] 신규매수 차단: {mkt_reason}")
+
+    if allow_intraday and crash_bounce.is_enabled() and not crash_bounce_sim.is_enabled():
         _check_crash_bounce_entry()
 
-    if v_reversal.is_entry_window():
+    if allow_intraday and v_reversal.is_entry_window():
         _check_v_reversal_entry()
 
     if ul_rebound.is_monitor_window():
@@ -2068,7 +2078,7 @@ def run_market_check() -> None:
 
     _check_k1_closing_exit()
 
-    if is_entry_time():
+    if allow_intraday and is_entry_time():
         _check_entry()
 
 
@@ -2123,6 +2133,7 @@ def run_status_report() -> None:
         lines = [
             "📊 <b>오전 11시 상태 보고</b>",
             f"모드: {os.getenv('KIS_MODE', '알 수 없음')}",
+            market_filter.format_status_line(),
             f"장중매매 - 워치리스트: {len(_watchlist)}개 / 보유: {len(_positions)}개",
             f"장중 투자금: {_total_invested_today:,}원 / {MAX_TOTAL_AMOUNT:,}원",
             f"낙폭반등: {sum(1 for p in _positions.values() if p.get('strategy') == '낙폭반등')}개 / "
@@ -2527,6 +2538,14 @@ def run_late_force_close() -> None:
 
 def _check_closing_bet_entry() -> None:
     """AI 종가베팅 매수 (기본 14:45~14:50 1회) — 월~금 동일"""
+    allow_closing, mkt_reason = market_filter.allow_new_buy(for_closing=True)
+    if not allow_closing:
+        notifier.send(
+            f"🛑 <b>종가베팅 매수 스킵 — 지수필터</b>\n{mkt_reason}"
+        )
+        print(f"[종가베팅] 지수필터 차단: {mkt_reason}")
+        return
+
     if not _closing_watchlist:
         notifier.send("⚠️ 종가베팅 매수 스킵 — 워치리스트 비어 있음 (재시작·미스크리닝 가능)")
         print("[종가베팅] 매수 스킵 — 워치리스트 없음")
@@ -3115,6 +3134,14 @@ def _check_strong_v_sim() -> None:
 def run_afternoon_rebound_scan() -> None:
     """13:15 — 오전 미체결 전략만 오후 전용 필터로 한 번 재검색."""
     if not is_trading_day():
+        return
+
+    allow_intraday, mkt_reason = market_filter.allow_new_buy(for_closing=False)
+    if not allow_intraday:
+        notifier.send(
+            f"🛑 13:15 오후 반등 재검색 스킵 — 지수필터\n{mkt_reason}"
+        )
+        print(f"[오후재검색] 지수필터 차단: {mkt_reason}")
         return
 
     eligible: list[str] = []
@@ -4253,7 +4280,8 @@ def main():
             f"전일고가·MA20\n"
             f"✅ 익절 트레일링 +{TAKE_PROFIT_PCT}% / "
             f"손절 −{STOP_LOSS_PCT}% (매수 {QUICK_STOP_WINDOW_MIN}분 내 −{QUICK_STOP_LOSS_PCT}%) / "
-            f"15:10 손익보고"
+            f"15:10 손익보고\n"
+            f"🛡️ {market_filter.format_status_line()}"
             f"{crash_note}"
             f"{cb_sim_note}"
             f"{v_note}"

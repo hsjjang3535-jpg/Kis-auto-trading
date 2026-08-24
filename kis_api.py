@@ -401,6 +401,58 @@ def get_stock_info(stock_code: str) -> dict:
     return data.get("output", {})
 
 
+# 지수 프록시 ETF (지수 API 실패 시)
+_INDEX_ETF_FALLBACK = {
+    "0001": "069500",  # 코스피 → KODEX 200
+    "1001": "229200",  # 코스닥 → KODEX 코스닥150
+}
+
+
+def get_index_price(index_code: str = "0001") -> dict:
+    """국내업종 현재지수 (FHPUP02100000).
+    index_code: 0001=코스피, 1001=코스닥, 2001=코스피200
+    """
+    data = _market_get(
+        "/uapi/domestic-stock/v1/quotations/inquire-index-price",
+        "FHPUP02100000",
+        {
+            "fid_cond_mrkt_div_code": "U",
+            "fid_input_iscd": index_code,
+        },
+    )
+    return data.get("output", {}) or {}
+
+
+def get_index_change_pct(index_code: str = "0001") -> float | None:
+    """지수 전일대비 등락률(%). 실패 시 ETF 프록시, 그래도 실패면 None."""
+    try:
+        out = get_index_price(index_code)
+        for key in (
+            "bstp_nmix_prdy_ctrt",
+            "prdy_ctrt",
+            "prdy_ctrt_nmix",
+            "flt_rt",
+        ):
+            raw = out.get(key)
+            if raw is not None and str(raw).strip() != "":
+                return float(raw)
+    except Exception as e:
+        print(f"[지수] {index_code} 조회 실패: {e}")
+
+    etf = _INDEX_ETF_FALLBACK.get(index_code)
+    if not etf:
+        return None
+    try:
+        info = get_stock_info(etf)
+        raw = info.get("prdy_ctrt")
+        if raw is not None and str(raw).strip() != "":
+            print(f"[지수] {index_code} → ETF {etf} 등락 {raw}% 사용")
+            return float(raw)
+    except Exception as e:
+        print(f"[지수] ETF 폴백 {etf} 실패: {e}")
+    return None
+
+
 def get_current_price(stock_code: str, fallback: float | None = None) -> float:
     """현재가 조회 (실패 시 fallback 사용)"""
     try:
