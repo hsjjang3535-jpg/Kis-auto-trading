@@ -47,8 +47,11 @@ import market_filter
 
 load_dotenv()
 
-MAX_BUY_AMOUNT = int(os.getenv("MAX_BUY_AMOUNT", "500000"))
-MAX_TOTAL_AMOUNT = int(os.getenv("MAX_TOTAL_AMOUNT", "1000000"))
+# 환경변수 한도 = 상한. DYNAMIC_CAPITAL이어도 이 값을 넘기지 않음.
+_MAX_BUY_CAP = int(os.getenv("MAX_BUY_AMOUNT", "1000000"))
+_MAX_TOTAL_CAP = int(os.getenv("MAX_TOTAL_AMOUNT", "2000000"))
+MAX_BUY_AMOUNT = _MAX_BUY_CAP
+MAX_TOTAL_AMOUNT = _MAX_TOTAL_CAP
 SELL_BLACKLIST = [s.strip() for s in os.getenv("SELL_BLACKLIST", "").split(",") if s.strip()]
 CLOSING_HOLD_EXCLUDE = [
     s.strip() for s in os.getenv("CLOSING_HOLD_EXCLUDE", "").split(",") if s.strip()
@@ -60,10 +63,10 @@ TRAILING_STOP_PCT = float(os.getenv("TRAILING_STOP_PCT", "1.0"))
 # 매수 직후 빠른 손절 (가짜 돌파 조기 청산) — 창 지나면 기존 STOP_LOSS_PCT 적용
 QUICK_STOP_LOSS_PCT = float(os.getenv("QUICK_STOP_LOSS_PCT", "1.5"))
 QUICK_STOP_WINDOW_MIN = int(os.getenv("QUICK_STOP_WINDOW_MIN", "30"))
-# 동적 자금 관리: True면 매일 실제 예수금으로 한도 자동 조절
+# 동적 자금 관리: True면 예수금이 환경변수 한도보다 작을 때만 축소 (상향 확대 안 함)
 DYNAMIC_CAPITAL = os.getenv("DYNAMIC_CAPITAL", "true").lower() == "true"
-# 1회 매수금액 = 예수금의 이 비율 (기본 50%)
-BUY_RATIO = float(os.getenv("BUY_RATIO", "0.5"))
+# 1회 매수 = min(상한, 예수금×비율). 상한이 1M이면 예수금이 커도 1M 유지
+BUY_RATIO = float(os.getenv("BUY_RATIO", "1.0"))
 # 종가베팅 자금 한도 (별도 관리)
 MAX_CLOSING_AMOUNT = int(os.getenv("MAX_CLOSING_AMOUNT", "500000"))  # 종가베팅 총 한도
 MAX_CLOSING_BUY = int(os.getenv("MAX_CLOSING_BUY", "500000"))        # 종가베팅 1회 매수
@@ -1431,7 +1434,7 @@ def _format_empty_watchlist_msg(kind: str = "장중") -> str:
 
 
 def _update_capital() -> None:
-    """실제 예수금으로 MAX_TOTAL_AMOUNT, MAX_BUY_AMOUNT 자동 조절"""
+    """예수금에 맞춰 한도 축소만 함. 환경변수 MAX_* 상한은 넘지 않음."""
     global MAX_TOTAL_AMOUNT, MAX_BUY_AMOUNT
     if not DYNAMIC_CAPITAL:
         return
@@ -1440,18 +1443,24 @@ def _update_capital() -> None:
         if cash <= 0:
             print("[자금관리] 예수금 조회 실패 또는 0원 - 기존 한도 유지")
             return
-        # 예수금 전액을 총 한도로 설정 (단, 환경변수 최솟값 이상 유지)
         old_total = MAX_TOTAL_AMOUNT
-        old_buy   = MAX_BUY_AMOUNT
-        MAX_TOTAL_AMOUNT = cash
-        MAX_BUY_AMOUNT   = int(cash * BUY_RATIO)
-        print(f"[자금관리] 예수금 {cash:,}원 → 총한도 {MAX_TOTAL_AMOUNT:,}원 / 1회매수 {MAX_BUY_AMOUNT:,}원")
-        if old_total != MAX_TOTAL_AMOUNT:
+        old_buy = MAX_BUY_AMOUNT
+        # 상한 = env, 실사용 = min(상한, 예수금·비율) — 예수금이 커도 1종목 한도 유지
+        MAX_BUY_AMOUNT = min(_MAX_BUY_CAP, int(cash * BUY_RATIO), cash)
+        MAX_TOTAL_AMOUNT = min(_MAX_TOTAL_CAP, cash)
+        print(
+            f"[자금관리] 예수금 {cash:,}원 → "
+            f"총한도 {MAX_TOTAL_AMOUNT:,}원(상한 {_MAX_TOTAL_CAP:,}) / "
+            f"1회매수 {MAX_BUY_AMOUNT:,}원(상한 {_MAX_BUY_CAP:,})"
+        )
+        if old_total != MAX_TOTAL_AMOUNT or old_buy != MAX_BUY_AMOUNT:
             notifier.send(
                 f"💰 <b>자금 한도 자동 조절</b>\n"
                 f"예수금: {cash:,}원\n"
-                f"총 투자 한도: {old_total:,}원 → {MAX_TOTAL_AMOUNT:,}원\n"
-                f"1회 매수 한도: {old_buy:,}원 → {MAX_BUY_AMOUNT:,}원 (예수금의 {int(BUY_RATIO*100)}%)"
+                f"총 투자 한도: {old_total:,}원 → {MAX_TOTAL_AMOUNT:,}원 "
+                f"(상한 {_MAX_TOTAL_CAP:,})\n"
+                f"1회 매수 한도: {old_buy:,}원 → {MAX_BUY_AMOUNT:,}원 "
+                f"(상한 {_MAX_BUY_CAP:,}원)"
             )
     except Exception as e:
         print(f"[자금관리] 예수금 조회 오류: {e}")

@@ -63,8 +63,8 @@ CLOSING_RECOVERY_POSITIONS=042700|한미반도체|2026-07-15|2026-07-16,004310|�
 | `PORT` | `8080` | HTTP API (Railway 자동 설정 시 생략 가능) |
 | `DATA_DIR` | `/data` | **권장** 상태·손익장부 저장 경로. Railway Volume을 `/data`에 마운트 |
 | `ENABLE_CRASH_BOUNCE` | `true` | 낙폭반등 ON |
-| `DYNAMIC_CAPITAL` | `true` | 예수금 기준 자동 한도 조절 |
-| `BUY_RATIO` | `0.5` | 1회 매수 = 예수금 50% |
+| `DYNAMIC_CAPITAL` | `true` | 예수금이 env 한도보다 작을 때만 축소 (상한 확대 안 함) |
+| `BUY_RATIO` | `1.0` | 1회 매수 = min(MAX_BUY_AMOUNT, 예수금×비율) |
 | `ENABLE_MARKET_FILTER` | `true` | 지수 약세 시 신규매수 차단 |
 
 ---
@@ -91,8 +91,8 @@ CLOSING_RECOVERY_POSITIONS=042700|한미반도체|2026-07-15|2026-07-16,004310|�
 
 | Variable | 기본값 | 설명 |
 |----------|--------|------|
-| `MAX_TOTAL_AMOUNT` | `1000000` | 장중 총 투자 한도 |
-| `MAX_BUY_AMOUNT` | `500000` | 장중 1회 매수 한도 |
+| `MAX_TOTAL_AMOUNT` | `2000000` | 장중 총 투자 한도(상한, 1종목 100만×2종목) |
+| `MAX_BUY_AMOUNT` | `1000000` | 장중 1종목·1회 매수 한도(상한, 기본 100만원) |
 | `MAX_BUY_CASH_FAILS` | `3` | 주문가능금액 초과 시 종목당 재시도 상한 (초과 시 당일 스킵, 알림 1회) |
 | `MAX_CLOSING_AMOUNT` | `500000` | 종가베팅 총 한도 |
 | `MAX_CLOSING_BUY` | `500000` | 종가베팅 1회 매수 |
@@ -434,7 +434,7 @@ CLOSING_RECOVERY_POSITIONS=042700|한미반도체|2026-07-15|2026-07-16,004310|�
 ### 전환 전 체크
 
 1. **모의 계좌 잔여 포지션** (데이터솔루션, 종가베팅 오버나이트 등)은 모의 계좌에서 **별도 정리** (실전과 무관)
-2. KIS 앱/HTS에서 **실전 계좌 예수금** 확인 — `DYNAMIC_CAPITAL=true`면 예수금 기준으로 한도 자동 조절
+2. KIS 앱/HTS에서 **실전 계좌 예수금** 확인 — `DYNAMIC_CAPITAL=true`여도 `MAX_BUY_AMOUNT`/`MAX_TOTAL_AMOUNT` 상한은 넘지 않음(예수금 부족 시에만 축소)
 3. Railway Variables 4개 변경 후 **Redeploy**
 4. 텔레그램 시작 메시지: `📍 모드: 실전` + `✅ 계좌 연결 OK` 확인
 5. `/health` → `"kis_mode": "실전"`, `account_warning: null`, `orderable_cash` 확인
