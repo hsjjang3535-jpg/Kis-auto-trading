@@ -1869,11 +1869,13 @@ def run_closing_bet_screening() -> None:
             time.sleep(2)
 
         if candidates and ai_fail_count == len(candidates):
+            print("[종가베팅] AI 전부 실패 → 기술조건 통과 종목으로 진행")
             approved = candidates
             ai_rejected = []
             for c in approved:
-                c.setdefault("reason", "AI 분석 불가 (기술적 조건 통과)")
-                c.setdefault("strength", "약")
+                c["reason"] = ai_analyzer.tech_fallback_reason(c)
+                c["strength"] = c.get("strength") if c.get("strength") not in (None, "없음") else "약"
+                c["buy"] = True
 
         # 조건 부합도 높은 종목부터 매수 (1종목 보유 시 최우선 1개만 체결)
         approved = _sort_closing_watchlist(approved)
@@ -1984,7 +1986,9 @@ def run_morning_screening(supplementary: bool = False) -> bool:
                 approved = candidates
                 ai_rejected = []
                 for c in approved:
-                    c.setdefault("reason", "AI 분석 불가 (기술적 조건 통과)")
+                    c["reason"] = ai_analyzer.tech_fallback_reason(c)
+                    c["strength"] = c.get("strength") if c.get("strength") not in (None, "없음") else "약"
+                    c["buy"] = True
 
         # 잔액 부족 시 모멘텀·전략 점수 높은 종목부터 매수
         approved = _sort_intraday_watchlist(approved)

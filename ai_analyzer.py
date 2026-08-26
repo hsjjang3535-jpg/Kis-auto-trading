@@ -9,11 +9,23 @@ load_dotenv()
 
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
-_MODELS = [
-    "llama-3.3-70b-versatile",
-    "llama-3.1-8b-instant",
-    "gemma2-9b-it",
+# Groq: llama-3.3-70b / llama-3.1-8b / gemma2-9b 는 2025~2026 폐기됨
+# https://console.groq.com/docs/deprecations
+_DEFAULT_MODELS = [
+    "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b",
+    "qwen/qwen3.6-27b",
 ]
+
+
+def _load_models() -> list[str]:
+    raw = (os.getenv("GROQ_MODELS") or "").strip()
+    if raw:
+        return [m.strip() for m in raw.split(",") if m.strip()]
+    return list(_DEFAULT_MODELS)
+
+
+_MODELS = _load_models()
 
 # 완화 모드: buy=false여도 strength가 이 중 하나면 워치리스트 통과
 _APPROVE_STRENGTHS = ("강", "중", "약")
@@ -75,7 +87,36 @@ def _format_technical_context(ctx: dict) -> str:
     return "\n".join(lines) if lines else "- (차트 지표 없음)"
 
 
+def _retryable_groq_error(err: Exception) -> bool:
+    """모델 폐기·과부하·레이트리밋 등은 다음 모델로 계속 시도."""
+    s = str(err).lower()
+    keys = (
+        "503", "429", "404", "502", "500",
+        "overcapacity", "overloaded", "rate limit", "rate_limit",
+        "not found", "decommission", "deprecated", "model_not_found",
+        "unavailable", "timeout", "timed out",
+    )
+    return any(k in s for k in keys)
+
+
+def _parse_json_object(text: str) -> dict | None:
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if not match:
+        return None
+    try:
+        return json.loads(match.group())
+    except json.JSONDecodeError:
+        # 모델이 따옴표/트레일링 콤마를 깨뜨리는 경우 완화
+        cleaned = match.group().replace("'", '"')
+        cleaned = re.sub(r",\s*}", "}", cleaned)
+        try:
+            return json.loads(cleaned)
+        except json.JSONDecodeError:
+            return None
+
+
 def _call_groq(prompt: str) -> dict | None:
+    last_err: Exception | None = None
     for model in _MODELS:
         try:
             response = groq_client.chat.completions.create(
@@ -83,19 +124,44 @@ def _call_groq(prompt: str) -> dict | None:
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.2,
             )
-            text = response.choices[0].message.content.strip()
-            match = re.search(r"\{.*\}", text, re.DOTALL)
-            if match:
-                return json.loads(match.group())
-            break
+            text = (response.choices[0].message.content or "").strip()
+            parsed = _parse_json_object(text)
+            if parsed is not None:
+                return parsed
+            print(f"[AI] {model} JSON 파싱 실패, 다음 모델 시도...")
+            continue
         except Exception as e:
-            err_str = str(e).lower()
-            if "503" in err_str or "overcapacity" in err_str or "overloaded" in err_str:
-                print(f"[AI] {model} 과부하, 다음 모델 시도...")
+            last_err = e
+            if _retryable_groq_error(e):
+                print(f"[AI] {model} 실패({e}), 다음 모델 시도...")
                 continue
             print(f"[AI 분석 오류] {e}")
             break
+    if last_err:
+        print(f"[AI] 모든 모델 실패: {last_err}")
     return None
+
+
+def tech_fallback_reason(c: dict) -> str:
+    """AI 실패 시 텔레그램에 보여줄 기술 지표 기반 사유."""
+    parts = []
+    chg = c.get("change_rate")
+    if chg is not None:
+        parts.append(f"등락{chg:+.1f}%")
+    rsi = c.get("rsi")
+    if rsi is not None:
+        parts.append(f"RSI{rsi:.0f}")
+    vol = c.get("vol_ratio")
+    if vol is not None:
+        parts.append(f"거래량{vol:.1f}x")
+    near = c.get("close_near_high")
+    if near is not None:
+        parts.append(f"종가강도{float(near):.0%}")
+    strat = c.get("strategy")
+    if strat:
+        parts.append(str(strat))
+    detail = " · ".join(parts) if parts else "기술조건 통과"
+    return f"AI 일시불가 · {detail}"
 
 
 def analyze(
