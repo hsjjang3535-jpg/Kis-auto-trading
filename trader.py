@@ -74,8 +74,8 @@ CLOSING_BET_MAX_PER_SLOT = int(os.getenv("CLOSING_BET_MAX_PER_SLOT", "1"))  # 5�
 CLOSING_BET_MAX_POSITIONS = int(os.getenv("CLOSING_BET_MAX_POSITIONS", "1"))  # 동시 보유 종목 수
 CLOSING_BET_OVERHEAT_RSI = float(os.getenv("CLOSING_BET_OVERHEAT_RSI", "72"))  # 1순위 RSI 과열 기준
 CLOSING_BET_TRY_TOP_N = int(os.getenv("CLOSING_BET_TRY_TOP_N", "2"))  # 1순위 과열 시 2순위까지 시도
-# 장중매매 AI (false=기술 통과만 워치리스트, 종가베팅 AI는 별도 유지)
-ENABLE_INTRADAY_AI = os.getenv("ENABLE_INTRADAY_AI", "false").lower() == "true"
+# 장중매매 AI (true=Groq 2차 필터, false=기술 통과만 워치리스트; 종가베팅 AI는 항상 ON)
+ENABLE_INTRADAY_AI = os.getenv("ENABLE_INTRADAY_AI", "true").lower() == "true"
 # 낙폭반등·V자반등 오전 미체결 시 오후 필터 1회 재검색
 AFTERNOON_REBOUND_SCAN_MIN = 13 * 60 + 15
 

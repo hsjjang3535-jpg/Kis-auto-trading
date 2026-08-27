@@ -152,7 +152,7 @@ CLOSING_RECOVERY_POSITIONS=042700|한미반도체|2026-07-15|2026-07-16,004310|�
 > 워치리스트는 익일 15:10에 **가상손익 알림**.  
 > 예전 `CLOSING_TAKE_PROFIT_PCT`는 사용하지 않음 — Railway에서 제거하세요.
 | `LOWER_RSI_MAX` | `50` | 하단매매 RSI 상한 |
-| `ENABLE_INTRADAY_AI` | `false` | 장중 AI (`true`=Groq 2차 필터, `false`=기술조건만) |
+| `ENABLE_INTRADAY_AI` | `true` | 장중 AI (`true`=Groq 2차 필터, `false`=기술조건만). 종가베팅 AI는 항상 ON |
 
 > 돌파매매: **안전**과 **모멘텀**이 동시에 되면 **안전(정액) 우선**, 종목당 1회만 매수.
 

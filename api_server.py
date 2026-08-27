@@ -43,7 +43,7 @@ def health():
         "account_warning": warn,
         "orderable_cash": orderable_cash,
         "strategies": {
-            "intraday_ai": os.getenv("ENABLE_INTRADAY_AI", "false").lower() == "true",
+            "intraday_ai": os.getenv("ENABLE_INTRADAY_AI", "true").lower() == "true",
             "crash_bounce": crash_bounce.is_enabled(),
             "crash_bounce_sim": crash_bounce_sim.is_enabled(),
             "v_reversal": v_reversal.is_enabled(),
