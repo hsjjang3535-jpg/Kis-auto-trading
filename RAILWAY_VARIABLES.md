@@ -66,6 +66,19 @@ CLOSING_RECOVERY_POSITIONS=042700|한미반도체|2026-07-15|2026-07-16,004310|�
 | `DYNAMIC_CAPITAL` | `true` | 예수금이 env 한도보다 작을 때만 축소 (상한 확대 안 함) |
 | `BUY_RATIO` | `1.0` | 1회 매수 = min(MAX_BUY_AMOUNT, 예수금×비율) |
 | `ENABLE_MARKET_FILTER` | `true` | 지수 약세 시 신규매수 차단 |
+| `ENABLE_DEFENSE_MODE` | `true` | 연속손절·일/주 손실 한도 방어 |
+
+### 방어모드 (연속 손절·일/주 손실 한도)
+
+| Variable | 기본값 | 설명 |
+|----------|--------|------|
+| `ENABLE_DEFENSE_MODE` | `true` | 방어모드 ON |
+| `DEFENSE_MAX_CONSEC_LOSSES` | `2` | 연속 실전 손실 N건 → 당일 신규매수 중단 |
+| `DEFENSE_DAILY_LOSS_LIMIT` | `-40000` | 당일 실전 손익 ≤ 이 값이면 당일 중단 |
+| `DEFENSE_WEEKLY_LOSS_LIMIT` | `-50000` | 월~금 실전 합 ≤ 이면 금요까지 중단 |
+| `DEFENSE_BLOCK_CLOSING` | `true` | 중단 시 종가베팅 신규도 막음 |
+
+보유 청산은 항상 동작. 시뮬은 그대로 돌아감.
 
 ---
 
@@ -77,10 +90,10 @@ CLOSING_RECOVERY_POSITIONS=042700|한미반도체|2026-07-15|2026-07-16,004310|�
 | Variable | 기본값 | 설명 |
 |----------|--------|------|
 | `ENABLE_MARKET_FILTER` | `true` | 필터 ON |
-| `MARKET_FILTER_KOSDAQ_MIN` | `-0.8` | 코스닥 등락 ≤ 이 값이면 약세 |
+| `MARKET_FILTER_KOSDAQ_MIN` | `-0.5` | 코스닥 등락 ≤ 이 값이면 약세 |
 | `MARKET_FILTER_KOSPI_MIN` | `-1.0` | 코스피 등락 ≤ 이 값이면 약세 |
 | `MARKET_FILTER_REQUIRE` | `any` | `any`=하나라도 약하면 차단 / `both`=둘 다 약해야만 |
-| `MARKET_FILTER_BLOCK_CLOSING` | `false` | `true`면 종가베팅 신규도 차단 |
+| `MARKET_FILTER_BLOCK_CLOSING` | `true` | `true`면 종가베팅 신규도 차단 |
 | `MARKET_FILTER_CACHE_SEC` | `60` | 지수 조회 캐시(초) |
 
 차단·해제 시 텔레그램 알림 1회. 지수 조회 실패 시에는 매수를 막지 않습니다.

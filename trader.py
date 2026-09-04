@@ -44,6 +44,7 @@ import k1_plus
 import k2_plus
 import strong_v_sim
 import market_filter
+import defense_mode
 
 load_dotenv()
 
@@ -752,6 +753,7 @@ def _save_state() -> None:
         "closing_wl_staging": _closing_wl_staging,
         "closing_watchlist": _closing_watchlist,
         "daily_pnl_ledger": _daily_pnl_ledger,
+        "defense_mode": defense_mode.dump_state(),
     }
     try:
         with open(_STATE_FILE, "w", encoding="utf-8") as f:
@@ -937,6 +939,11 @@ def _load_state() -> None:
         if _daily_pnl_ledger:
             print(f"[상태 복원] 일별 손익 장부 {len(_daily_pnl_ledger)}일 불러옴")
             _save_pnl_ledger_file()
+        defense_mode.load_state(state.get("defense_mode"))
+        if defense_mode.dump_state().get("pause_until"):
+            print(
+                f"[상태 복원] 방어모드 pause→{defense_mode.dump_state().get('pause_until')}"
+            )
 
         # 장중 포지션은 오늘 날짜인 경우만
         if state.get("date") == _today_kst():
@@ -1124,6 +1131,28 @@ def _record_daily_pnl(
         _daily_pnl_ledger.append(entry)
     _daily_pnl_ledger = sorted(_daily_pnl_ledger, key=lambda x: x["date"])[-40:]
     _save_state()
+
+
+def _defense_allow(for_closing: bool = False) -> tuple[bool, str]:
+    return defense_mode.allow_new_buy(
+        for_closing=for_closing,
+        trades_today=_trades_today,
+        daily_ledger=_daily_pnl_ledger,
+    )
+
+
+def _defense_after_live_trade() -> None:
+    """실전 매도 체결 후 방어모드 한도 재평가."""
+    try:
+        status = defense_mode.refresh(
+            trades_today=_trades_today,
+            daily_ledger=_daily_pnl_ledger,
+        )
+        defense_mode.notify_if_triggered(notifier.send, status)
+        if status.get("changed"):
+            _save_state()
+    except Exception as e:
+        print(f"[방어모드] 갱신 오류: {e}")
 
 
 def _week_mon_fri_dates(ref: datetime | None = None) -> list[str]:
@@ -1608,6 +1637,7 @@ def _record_manual_sell(code: str, pos: dict, strategy: str, store: dict) -> Non
     store.pop(code, None)
     notifier.notify_sell(name, code, quantity, profit_pct, reason)
     print(f"[포지션동기화] {name}({code}) {reason}")
+    _defense_after_live_trade()
 
 
 def reconcile_positions_with_account(notify_empty: bool = False) -> list[str]:
@@ -2067,9 +2097,13 @@ def run_market_check() -> None:
     except Exception as e:
         print(f"[지수필터] 알림 오류: {e}")
 
-    allow_intraday, mkt_reason = market_filter.allow_new_buy(for_closing=False)
-    if not allow_intraday:
+    allow_mkt, mkt_reason = market_filter.allow_new_buy(for_closing=False)
+    allow_def, def_reason = _defense_allow(for_closing=False)
+    allow_intraday = allow_mkt and allow_def
+    if not allow_mkt:
         print(f"[지수필터] 신규매수 차단: {mkt_reason}")
+    if not allow_def:
+        print(f"[방어모드] 신규매수 차단: {def_reason}")
 
     if allow_intraday and crash_bounce.is_enabled() and not crash_bounce_sim.is_enabled():
         _check_crash_bounce_entry()
@@ -2147,6 +2181,7 @@ def run_status_report() -> None:
             "📊 <b>오전 11시 상태 보고</b>",
             f"모드: {os.getenv('KIS_MODE', '알 수 없음')}",
             market_filter.format_status_line(),
+            defense_mode.format_status_line(),
             f"장중매매 - 워치리스트: {len(_watchlist)}개 / 보유: {len(_positions)}개",
             f"장중 투자금: {_total_invested_today:,}원 / {MAX_TOTAL_AMOUNT:,}원",
             f"낙폭반등: {sum(1 for p in _positions.values() if p.get('strategy') == '낙폭반등')}개 / "
@@ -2559,6 +2594,14 @@ def _check_closing_bet_entry() -> None:
         print(f"[종가베팅] 지수필터 차단: {mkt_reason}")
         return
 
+    allow_def, def_reason = _defense_allow(for_closing=True)
+    if not allow_def:
+        notifier.send(
+            f"🛡️ <b>종가베팅 매수 스킵 — 방어모드</b>\n{def_reason}"
+        )
+        print(f"[종가베팅] 방어모드 차단: {def_reason}")
+        return
+
     if not _closing_watchlist:
         notifier.send("⚠️ 종가베팅 매수 스킵 — 워치리스트 비어 있음 (재시작·미스크리닝 가능)")
         print("[종가베팅] 매수 스킵 — 워치리스트 없음")
@@ -2833,6 +2876,7 @@ def _execute_closing_sell(code: str, pos: dict, reason: str) -> None:
             del _closing_positions[code]
             _save_state()
             notifier.notify_sell(name, code, quantity, profit_pct, sell_reason)
+            _defense_after_live_trade()
         else:
             msg = result.get("msg1", "알 수 없는 오류")
             if _is_already_sold_error(msg):
@@ -3155,6 +3199,14 @@ def run_afternoon_rebound_scan() -> None:
             f"🛑 13:15 오후 반등 재검색 스킵 — 지수필터\n{mkt_reason}"
         )
         print(f"[오후재검색] 지수필터 차단: {mkt_reason}")
+        return
+
+    allow_def, def_reason = _defense_allow(for_closing=False)
+    if not allow_def:
+        notifier.send(
+            f"🛡️ 13:15 오후 반등 재검색 스킵 — 방어모드\n{def_reason}"
+        )
+        print(f"[오후재검색] 방어모드 차단: {def_reason}")
         return
 
     eligible: list[str] = []
@@ -3515,6 +3567,11 @@ def _check_k1_closing_entry() -> None:
     if not k1_closing.is_closing_entry_window():
         return
 
+    allow_def, def_reason = _defense_allow(for_closing=True)
+    if not allow_def:
+        print(f"[K1종가] 방어모드 차단: {def_reason}")
+        return
+
     global _closing_invested_today, _k1_closing_positions
     global _closing_depleted_notified, _closing_balance_fail_notified
 
@@ -3638,6 +3695,7 @@ def _check_k1_closing_exit() -> None:
                 _save_state()
                 notifier.notify_sell(name, code, quantity, profit_pct, reason)
                 print(f"[K1종가] 매도 {name}({code}) {reason}")
+                _defense_after_live_trade()
             else:
                 msg = result.get("msg1", "")
                 if _is_already_sold_error(msg):
@@ -4089,6 +4147,7 @@ def _execute_sell(code: str, pos: dict, reason: str,
             del _positions[code]
             _save_state()
             notifier.notify_sell(name, code, quantity, profit_pct, sell_reason)
+            _defense_after_live_trade()
         else:
             msg = result.get("msg1", "알 수 없는 오류")
             notifier.notify_error(f"{name} 매도 실패: {msg}")
@@ -4152,6 +4211,18 @@ def main():
             "Volume을 /data에 붙이고 DATA_DIR=/data 를 권장합니다."
         )
     _load_state()
+    # 장부 기준 주간/일 손실이 이미 한도 넘었으면 즉시 방어 가동
+    try:
+        status = defense_mode.refresh(
+            trades_today=_trades_today,
+            daily_ledger=_daily_pnl_ledger,
+        )
+        defense_mode.notify_if_triggered(notifier.send, status)
+        if status.get("blocked"):
+            print(f"[방어모드] 시작 시 활성: {status.get('reason')}")
+            _save_state()
+    except Exception as e:
+        print(f"[방어모드] 시작 평가 오류: {e}")
 
     acc_ok, acc_msg, orderable_cash = kis_api.verify_trade_account()
     print(f"[계좌 검증] {acc_msg}")
@@ -4294,7 +4365,8 @@ def main():
             f"✅ 익절 트레일링 +{TAKE_PROFIT_PCT}% / "
             f"손절 −{STOP_LOSS_PCT}% (매수 {QUICK_STOP_WINDOW_MIN}분 내 −{QUICK_STOP_LOSS_PCT}%) / "
             f"15:10 손익보고\n"
-            f"🛡️ {market_filter.format_status_line()}"
+            f"🛡️ {market_filter.format_status_line()}\n"
+            f"🛡️ {defense_mode.format_status_line()}"
             f"{crash_note}"
             f"{cb_sim_note}"
             f"{v_note}"

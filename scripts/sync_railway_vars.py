@@ -53,11 +53,17 @@ PATCH = {
     "TRAILING_STOP_PCT": "1.0",
     # market filter (weak index → no new buys)
     "ENABLE_MARKET_FILTER": "true",
-    "MARKET_FILTER_KOSDAQ_MIN": "-0.8",
+    "MARKET_FILTER_KOSDAQ_MIN": "-0.5",
     "MARKET_FILTER_KOSPI_MIN": "-1.0",
     "MARKET_FILTER_REQUIRE": "any",
-    "MARKET_FILTER_BLOCK_CLOSING": "false",
+    "MARKET_FILTER_BLOCK_CLOSING": "true",
     "MARKET_FILTER_CACHE_SEC": "60",
+    # defense mode
+    "ENABLE_DEFENSE_MODE": "true",
+    "DEFENSE_MAX_CONSEC_LOSSES": "2",
+    "DEFENSE_DAILY_LOSS_LIMIT": "-40000",
+    "DEFENSE_WEEKLY_LOSS_LIMIT": "-50000",
+    "DEFENSE_BLOCK_CLOSING": "true",
     # screener / breakout B
     "UPPER_MA5_GAP_MAX": "15.0",
     "BREAKOUT_HIGH20_MAX_PCT": "3.0",

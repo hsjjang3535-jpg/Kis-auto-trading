@@ -18,11 +18,11 @@ import kis_api
 KST = ZoneInfo("Asia/Seoul")
 
 ENABLED = os.getenv("ENABLE_MARKET_FILTER", "true").lower() == "true"
-KOSDAQ_MIN = float(os.getenv("MARKET_FILTER_KOSDAQ_MIN", "-0.8"))
+KOSDAQ_MIN = float(os.getenv("MARKET_FILTER_KOSDAQ_MIN", "-0.5"))
 KOSPI_MIN = float(os.getenv("MARKET_FILTER_KOSPI_MIN", "-1.0"))
 # any = 둘 중 하나라도 약하면 차단 / both = 둘 다 약해야만 차단
 REQUIRE = os.getenv("MARKET_FILTER_REQUIRE", "any").strip().lower()
-BLOCK_CLOSING = os.getenv("MARKET_FILTER_BLOCK_CLOSING", "false").lower() == "true"
+BLOCK_CLOSING = os.getenv("MARKET_FILTER_BLOCK_CLOSING", "true").lower() == "true"
 CACHE_SEC = int(os.getenv("MARKET_FILTER_CACHE_SEC", "60"))
 
 _cache: dict | None = None
